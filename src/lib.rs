@@ -85,6 +85,8 @@ pub enum DeviceError {
     Utf8(#[from] Utf8Error),
     #[error(transparent)]
     WalkDir(#[from] walkdir::Error),
+    #[error("Package manager returned an error: {0}")]
+    PackageManagerError(String),
 }
 
 fn encode_message(payload: &str) -> Result<String> {
@@ -1042,6 +1044,36 @@ impl Device {
 
         let command = "usb:";
         self.execute_host_command(command, false, true).await?;
+        Ok(())
+    }
+
+    pub async fn install_package(
+        &self,
+        apk_path: &Path,
+        reinstall: bool,
+        grant_runtime_permissions: bool,
+    ) -> Result<()> {
+        let apk_path = apk_path.to_path_buf();
+        let base_name = apk_path.file_name().unwrap().to_str().unwrap();
+
+        // push the apk to /data/local/tmp and run the "pm install" command
+        let tmp_apk_path = UnixPathBuf::from("/data/local/tmp").join(base_name);
+        self.push(&mut File::open(apk_path).await?, &tmp_apk_path, 0o644)
+            .await?;
+
+        let mut command = "pm install".to_owned();
+        if reinstall {
+            command.push_str(" -r");
+        }
+        if grant_runtime_permissions {
+            command.push_str(" -g");
+        }
+        command.push_str(&format!(" {}", tmp_apk_path.display()));
+        let output = self.execute_host_shell_command(&command).await?;
+        if !output.starts_with("Success") {
+            return Err(DeviceError::PackageManagerError(output));
+        }
+
         Ok(())
     }
 }
