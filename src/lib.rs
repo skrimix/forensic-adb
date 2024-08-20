@@ -1028,6 +1028,22 @@ impl Device {
 
         Ok(())
     }
+
+    pub async fn tcpip(self, port: u16) -> Result<()> {
+        debug!("Restarting adbd in TCP mode on port {}", port);
+
+        let command = format!("tcpip:{}", port);
+        self.execute_host_command(&command, false, true).await?;
+        Ok(())
+    }
+
+    pub async fn usb(self) -> Result<()> {
+        debug!("Restarting adbd in USB mode");
+
+        let command = "usb:";
+        self.execute_host_command(command, false, true).await?;
+        Ok(())
+    }
 }
 
 pub(crate) fn append_components(

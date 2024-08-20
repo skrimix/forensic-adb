@@ -866,3 +866,33 @@ fn format_own_device_error_types() {
         "foo".to_string()
     );
 }
+
+#[tokio::test]
+#[ignore]
+async fn device_tcpip() {
+    run_device_test(|device: &Device, _: &TempDir, _: &UnixPath| {
+        Box::pin(async {
+            device
+                .clone()
+                .tcpip(5555)
+                .await
+                .expect("to restart adbd in TCP mode");
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn device_usb() {
+    run_device_test(|device: &Device, _: &TempDir, _: &UnixPath| {
+        Box::pin(async {
+            device
+                .clone()
+                .usb()
+                .await
+                .expect("to restart adbd in USB mode");
+        })
+    })
+    .await;
+}
