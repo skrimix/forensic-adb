@@ -14,6 +14,7 @@
 use crate::*;
 
 use futures::future::BoxFuture;
+use serial_test::serial;
 use std::collections::BTreeSet;
 use std::panic;
 use std::path::PathBuf;
@@ -94,14 +95,7 @@ where
         .unwrap();
     let mut test_root = UnixPathBuf::from(response.trim_end_matches('\n'));
 
-    // random suffix to avoid collisions
-    let suffix: String =
-        rand::Rng::sample_iter(rand::thread_rng(), &rand::distributions::Alphanumeric)
-            .take(10)
-            .map(char::from)
-            .collect();
-
-    test_root.push(format!("mozdevice-{}", suffix));
+    test_root.push("mozdevice");
 
     let _ = device.remove(&test_root).await;
 
@@ -263,6 +257,7 @@ async fn device_shell_command() {
 
 #[tokio::test]
 #[ignore]
+#[serial(forward)]
 async fn device_forward_port_hardcoded() {
     run_device_test(|device: &Device, _: &TempDir, _: &UnixPath| {
         Box::pin(async {
@@ -292,6 +287,7 @@ async fn device_forward_port_hardcoded() {
 
 #[tokio::test]
 #[ignore]
+#[serial(forward)]
 async fn device_kill_forward_port_no_forwarded_port() {
     run_device_test(|device: &Device, _: &TempDir, _: &UnixPath| {
         Box::pin(async {
@@ -306,6 +302,7 @@ async fn device_kill_forward_port_no_forwarded_port() {
 
 #[tokio::test]
 #[ignore]
+#[serial(forward)]
 async fn device_kill_forward_port_twice() {
     run_device_test(|device: &Device, _: &TempDir, _: &UnixPath| {
         Box::pin(async {
@@ -330,6 +327,7 @@ async fn device_kill_forward_port_twice() {
 
 #[tokio::test]
 #[ignore]
+#[serial(forward)]
 async fn device_kill_forward_all_ports_no_forwarded_port() {
     run_device_test(|device: &Device, _: &TempDir, _: &UnixPath| {
         Box::pin(async {
@@ -344,6 +342,7 @@ async fn device_kill_forward_all_ports_no_forwarded_port() {
 
 #[tokio::test]
 #[ignore]
+#[serial(forward)]
 async fn device_kill_forward_all_ports_twice() {
     run_device_test(|device: &Device, _: &TempDir, _: &UnixPath| {
         Box::pin(async {
@@ -373,6 +372,7 @@ async fn device_kill_forward_all_ports_twice() {
 
 #[tokio::test]
 #[ignore]
+#[serial(reverse)]
 async fn device_reverse_port_hardcoded() {
     run_device_test(|device: &Device, _: &TempDir, _: &UnixPath| {
         Box::pin(async {
@@ -399,6 +399,7 @@ async fn device_reverse_port_hardcoded() {
 
 #[tokio::test]
 #[ignore]
+#[serial(reverse)]
 async fn device_kill_reverse_port_no_reverse_port() {
     run_device_test(|device: &Device, _: &TempDir, _: &UnixPath| {
         Box::pin(async {
@@ -432,6 +433,7 @@ async fn device_kill_reverse_port_no_reverse_port() {
 
 #[tokio::test]
 #[ignore]
+#[serial(reverse)]
 async fn device_kill_reverse_all_ports_no_reversed_port() {
     run_device_test(|device: &Device, _: &TempDir, _: &UnixPath| {
         Box::pin(async {
@@ -446,6 +448,7 @@ async fn device_kill_reverse_all_ports_no_reversed_port() {
 
 #[tokio::test]
 #[ignore]
+#[serial(forward, reverse)]
 async fn device_kill_reverse_all_ports_twice() {
     run_device_test(|device: &Device, _: &TempDir, _: &UnixPath| {
         Box::pin(async {
@@ -475,6 +478,7 @@ async fn device_kill_reverse_all_ports_twice() {
 
 #[tokio::test]
 #[ignore]
+#[serial(file)]
 async fn device_push_pull_text_file() {
     run_device_test(
         |device: &Device, _: &TempDir, remote_root_path: &UnixPath| {
@@ -513,6 +517,7 @@ async fn device_push_pull_text_file() {
 
 #[tokio::test]
 #[ignore]
+#[serial(file)]
 async fn device_push_pull_large_binary_file() {
     run_device_test(
         |device: &Device, _: &TempDir, remote_root_path: &UnixPath| {
@@ -557,6 +562,7 @@ async fn device_push_pull_large_binary_file() {
 
 #[tokio::test]
 #[ignore]
+#[serial(file)]
 async fn device_push_permission() {
     run_device_test(
         |device: &Device, _: &TempDir, remote_root_path: &UnixPath| {
@@ -628,6 +634,7 @@ async fn device_push_permission() {
 
 #[tokio::test]
 #[ignore]
+#[serial(file)]
 async fn device_pull_fails_for_missing_file() {
     run_device_test(
         |device: &Device, _: &TempDir, remote_root_path: &UnixPath| {
@@ -646,6 +653,7 @@ async fn device_pull_fails_for_missing_file() {
 
 #[tokio::test]
 #[ignore]
+#[serial(file)]
 async fn device_push_and_list_dir() {
     run_device_test(
         |device: &Device, tmp_dir: &TempDir, remote_root_path: &UnixPath| {
@@ -737,6 +745,7 @@ async fn device_push_and_list_dir() {
 
 #[tokio::test]
 #[ignore]
+#[serial(file)]
 async fn device_push_and_pull_dir() {
     run_device_test(
         |device: &Device, tmp_dir: &TempDir, remote_root_path: &UnixPath| {
@@ -781,6 +790,7 @@ async fn device_push_and_pull_dir() {
 
 #[tokio::test]
 #[ignore]
+#[serial(file)]
 async fn device_push_and_list_dir_flat() {
     run_device_test(
         |device: &Device, tmp_dir: &TempDir, remote_root_path: &UnixPath| {

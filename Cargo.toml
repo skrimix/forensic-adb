@@ -27,5 +27,6 @@ walkdir = "2"
 
 [dev-dependencies]
 futures = "0.3.27"
-rand = "0.8.5"
+serial_test = "3.1.1"
+serial_test_derive = "3.1.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
