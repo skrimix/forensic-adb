@@ -122,15 +122,15 @@ fn parse_device_info(line: &str) -> Option<DeviceInfo> {
     }
 }
 
-fn parse_device_state(line: &str) -> Option<DeviceState> {
-    // Turn "serial\tstate" into a `DeviceState`.
+fn parse_device_brief(line: &str) -> Option<DeviceBrief> {
+    // Turn "serial\tstate" into a `DeviceBrief`.
     let mut pairs = line.split_whitespace();
     let serial = pairs.next();
     let state = pairs.next();
     if let (Some(serial), Some(state)) = (serial, state) {
-        Some(DeviceState {
+        Some(DeviceBrief {
             serial: serial.to_owned(),
-            state: state.to_owned(),
+            state: state.into(),
         })
     } else {
         None
@@ -242,11 +242,44 @@ async fn read_response(
 }
 
 /// Information about device connection state.
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
-pub struct DeviceState {
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct DeviceBrief {
     pub serial: DeviceSerial,
-    pub state: String,
+    pub state: DeviceState,
 }
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum DeviceState {
+    Offline,
+    Bootloader,
+    Device,
+    Host,
+    Recovery,
+    NoPermissions,
+    Sideload,
+    Unauthorized,
+    Authorizing,
+    Unknown,
+}
+
+impl From<&str> for DeviceState {
+    fn from(s: &str) -> Self {
+        match s {
+            "offline" => DeviceState::Offline,
+            "bootloader" => DeviceState::Bootloader,
+            "device" => DeviceState::Device,
+            "host" => DeviceState::Host,
+            "recovery" => DeviceState::Recovery,
+            "no permissions" => DeviceState::NoPermissions,
+            "sideload" => DeviceState::Sideload,
+            "unauthorized" => DeviceState::Unauthorized,
+            "authorizing" => DeviceState::Authorizing,
+            "unknown" => DeviceState::Unknown,
+            _ => DeviceState::Unknown,
+        }
+    }
+}
+
 /// Detailed information about an ADB device.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct DeviceInfo {
@@ -364,7 +397,7 @@ impl Host {
         Ok(infos)
     }
 
-    pub fn track_devices(&self) -> impl Stream<Item = Result<DeviceState>> + '_ {
+    pub fn track_devices(&self) -> impl Stream<Item = Result<DeviceBrief>> + '_ {
         async_stream::try_stream! {
             let mut stream = self.connect().await?;
             stream
@@ -386,7 +419,7 @@ impl Host {
                 if length > 0 {
                     let mut body = vec![0; length];
                     stream.read_exact(&mut body).await?;
-                    let device = parse_device_state(std::str::from_utf8(&body)?);
+                    let device = parse_device_brief(std::str::from_utf8(&body)?);
                     if let Some(device) = device {
                         yield device;
                     }
