@@ -101,7 +101,7 @@ fn parse_device_info(line: &str) -> Option<DeviceInfo> {
     let mut pairs = line.split_whitespace();
     let serial = pairs.next();
     let state = pairs.next();
-    if let (Some(serial), Some("device")) = (serial, state) {
+    if let (Some(serial), Some(state)) = (serial, state) {
         let info: BTreeMap<String, String> = pairs
             .filter_map(|pair| {
                 let mut kv = pair.split(':');
@@ -115,6 +115,7 @@ fn parse_device_info(line: &str) -> Option<DeviceInfo> {
 
         Some(DeviceInfo {
             serial: serial.to_owned(),
+            state: state.into(),
             info,
         })
     } else {
@@ -242,13 +243,13 @@ async fn read_response(
 }
 
 /// Information about device connection state.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct DeviceBrief {
     pub serial: DeviceSerial,
     pub state: DeviceState,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub enum DeviceState {
     Offline,
     Bootloader,
@@ -284,6 +285,7 @@ impl From<&str> for DeviceState {
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct DeviceInfo {
     pub serial: DeviceSerial,
+    pub state: DeviceState,
     pub info: BTreeMap<String, String>,
 }
 
@@ -320,6 +322,7 @@ impl Host {
             .devices::<Vec<_>>()
             .await?
             .into_iter()
+            .filter(|d| d.state == DeviceState::Device)
             .map(|d| d.serial)
             .collect();
 
