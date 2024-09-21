@@ -93,9 +93,17 @@ where
         .await
         .unwrap();
     let mut test_root = UnixPathBuf::from(response.trim_end_matches('\n'));
-    test_root.push("mozdevice");
 
-    let _ = device.remove(&test_root);
+    // random suffix to avoid collisions
+    let suffix: String =
+        rand::Rng::sample_iter(rand::thread_rng(), &rand::distributions::Alphanumeric)
+            .take(10)
+            .map(char::from)
+            .collect();
+
+    test_root.push(format!("mozdevice-{}", suffix));
+
+    let _ = device.remove(&test_root).await;
 
     // TODO: we've removed panic::catch_unwind here, if the test crashes the forwarding isn't cleaned up
     let _result = test(&device, &tmp_dir, &test_root).await;
@@ -515,7 +523,7 @@ async fn device_push_pull_large_binary_file() {
 
                 // Needs to be larger than 64kB to test multiple chunks.
                 for i in 0..100000u32 {
-                    content.push('0' as u8 + (i % 10) as u8);
+                    content.push(b'0' + (i % 10) as u8);
                 }
 
                 device
@@ -569,7 +577,7 @@ async fn device_push_permission() {
                     // Convert the mode integer into the string representation
                     // of the mode returned by `ls`. This assumes the object is
                     // a file and not a directory.
-                    let mut perms = vec!["-", "r", "w", "x", "r", "w", "x", "r", "w", "x"];
+                    let mut perms = ["-", "r", "w", "x", "r", "w", "x", "r", "w", "x"];
                     let mut bit_pos = 0;
                     while bit_pos < 9 {
                         if (1 << bit_pos) & mode == 0 {
@@ -651,10 +659,11 @@ async fn device_push_and_list_dir() {
                     let f = File::create(path).await.expect("to create file");
                     let mut f = tokio::io::BufWriter::new(f);
                     f.write_all(file.as_bytes()).await.expect("to write data");
+                    f.flush().await.expect("to flush data");
                 }
 
                 device
-                    .push_dir(tmp_dir.path(), &remote_root_path, 0o777)
+                    .push_dir(tmp_dir.path(), remote_root_path, 0o777)
                     .await
                     .expect("to push_dir");
 
@@ -669,7 +678,7 @@ async fn device_push_and_list_dir() {
                 }
 
                 let mut listings = device
-                    .list_dir(&remote_root_path)
+                    .list_dir(remote_root_path)
                     .await
                     .expect("to list_dir");
                 listings.sort();
@@ -744,10 +753,11 @@ async fn device_push_and_pull_dir() {
                     let f = File::create(path).await.expect("to create file");
                     let mut f = tokio::io::BufWriter::new(f);
                     f.write_all(file.as_bytes()).await.expect("to write data");
+                    f.flush().await.expect("to flush data");
                 }
 
                 device
-                    .push_dir(&src_dir, &remote_root_path, 0o777)
+                    .push_dir(&src_dir, remote_root_path, 0o777)
                     .await
                     .expect("to push_dir");
 
@@ -784,7 +794,7 @@ async fn device_push_and_list_dir_flat() {
                 ];
 
                 for file in files.iter() {
-                    let path = tmp_dir.path().join(&file);
+                    let path = tmp_dir.path().join(file);
                     let _ = std::fs::create_dir_all(path.parent().unwrap());
 
                     let f = File::create(path).await.expect("to create file");
@@ -792,10 +802,11 @@ async fn device_push_and_list_dir_flat() {
                     f.write_all(content.as_bytes())
                         .await
                         .expect("to write data");
+                    f.flush().await.expect("to flush data");
                 }
 
                 device
-                    .push_dir(tmp_dir.path(), &remote_root_path, 0o777)
+                    .push_dir(tmp_dir.path(), remote_root_path, 0o777)
                     .await
                     .expect("to push_dir");
 
@@ -810,7 +821,7 @@ async fn device_push_and_list_dir_flat() {
                 }
 
                 let mut listings = device
-                    .list_dir_flat(&remote_root_path, 7, "prefix".to_string())
+                    .list_dir_flat(remote_root_path, 7, "prefix".to_string())
                     .await
                     .expect("to list_dir_flat");
                 listings.sort();
@@ -860,6 +871,10 @@ fn format_own_device_error_types() {
         format!("{}", DeviceError::MultipleDevices),
         "Multiple Android devices online".to_string()
     );
+    assert_eq!(
+        format!("{}", DeviceError::PackageManagerError("foo".to_string())),
+        "Package manager returned an error: foo".to_string()
+    );
 
     assert_eq!(
         format!("{}", DeviceError::Adb("foo".to_string())),
@@ -867,35 +882,35 @@ fn format_own_device_error_types() {
     );
 }
 
-#[tokio::test]
-#[ignore]
-async fn device_tcpip() {
-    run_device_test(|device: &Device, _: &TempDir, _: &UnixPath| {
-        Box::pin(async {
-            device
-                .clone()
-                .tcpip(5555)
-                .await
-                .expect("to restart adbd in TCP mode");
-        })
-    })
-    .await;
-}
+// #[tokio::test]
+// #[ignore]
+// async fn device_tcpip() {
+//     run_device_test(|device: &Device, _: &TempDir, _: &UnixPath| {
+//         Box::pin(async {
+//             device
+//                 .clone()
+//                 .tcpip(5555)
+//                 .await
+//                 .expect("to restart adbd in TCP mode");
+//         })
+//     })
+//     .await;
+// }
 
-#[tokio::test]
-#[ignore]
-async fn device_usb() {
-    run_device_test(|device: &Device, _: &TempDir, _: &UnixPath| {
-        Box::pin(async {
-            device
-                .clone()
-                .usb()
-                .await
-                .expect("to restart adbd in USB mode");
-        })
-    })
-    .await;
-}
+// #[tokio::test]
+// #[ignore]
+// async fn device_usb() {
+//     run_device_test(|device: &Device, _: &TempDir, _: &UnixPath| {
+//         Box::pin(async {
+//             device
+//                 .clone()
+//                 .usb()
+//                 .await
+//                 .expect("to restart adbd in USB mode");
+//         })
+//     })
+//     .await;
+// }
 
 #[tokio::test]
 #[ignore]
