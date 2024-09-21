@@ -8,6 +8,7 @@ pub mod shell;
 #[cfg(test)]
 pub mod test;
 
+use futures_core::stream::Stream;
 use log::{debug, trace, warn};
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -121,6 +122,21 @@ fn parse_device_info(line: &str) -> Option<DeviceInfo> {
     }
 }
 
+fn parse_device_state(line: &str) -> Option<DeviceState> {
+    // Turn "serial\tstate" into a `DeviceState`.
+    let mut pairs = line.split_whitespace();
+    let serial = pairs.next();
+    let state = pairs.next();
+    if let (Some(serial), Some(state)) = (serial, state) {
+        Some(DeviceState {
+            serial: serial.to_owned(),
+            state: state.to_owned(),
+        })
+    } else {
+        None
+    }
+}
+
 /// Reads the payload length of a host message from the stream.
 async fn read_length<R: AsyncRead + Unpin>(stream: &mut R) -> Result<usize> {
     let mut bytes: [u8; 4] = [0; 4];
@@ -225,6 +241,12 @@ async fn read_response(
     Ok(response)
 }
 
+/// Information about device connection state.
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct DeviceState {
+    pub serial: DeviceSerial,
+    pub state: String,
+}
 /// Detailed information about an ADB device.
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct DeviceInfo {
@@ -340,6 +362,40 @@ impl Host {
         let infos: B = response.lines().filter_map(parse_device_info).collect();
 
         Ok(infos)
+    }
+
+    pub fn track_devices(&self) -> impl Stream<Item = Result<DeviceState>> + '_ {
+        async_stream::try_stream! {
+            let mut stream = self.connect().await?;
+            stream
+                .write_all(encode_message("host:track-devices")?.as_bytes())
+                .await?;
+
+            let mut bytes: [u8; 1024] = [0; 1024];
+            stream.read_exact(&mut bytes[0..4]).await?;
+            if !bytes.starts_with(SyncCommand::Okay.code()) {
+                let n = bytes.len().min(read_length(&mut stream).await?);
+                stream.read_exact(&mut bytes[0..n]).await?;
+                let message = std::str::from_utf8(&bytes[0..n]).map(|s| format!("adb error: {}", s))?;
+                Err(DeviceError::Adb(message))?;
+            }
+
+            loop {
+                let length = read_length(&mut stream).await?;
+
+                if length > 0 {
+                    let mut body = vec![0; length];
+                    stream.read_exact(&mut body).await?;
+                    let device = parse_device_state(std::str::from_utf8(&body)?);
+                    if let Some(device) = device {
+                        yield device;
+                    }
+                    else {
+                        Err(DeviceError::Adb("Failed to parse device state".to_owned()))?;
+                    }
+                }
+            }
+        }
     }
 }
 
