@@ -896,3 +896,15 @@ async fn device_usb() {
     })
     .await;
 }
+
+#[tokio::test]
+#[ignore]
+async fn device_list_packages() {
+    run_device_test(|device: &Device, _: &TempDir, _: &UnixPath| {
+        Box::pin(async {
+            let packages = device.list_packages(false).await.expect("to list packages");
+            assert!(packages.contains(&"com.android.shell".to_owned()));
+        })
+    })
+    .await;
+}

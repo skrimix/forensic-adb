@@ -1076,6 +1076,32 @@ impl Device {
 
         Ok(())
     }
+
+    pub async fn uninstall_package(&self, package: &str) -> Result<()> {
+        let command = format!("pm uninstall {}", package);
+        let output = self.execute_host_shell_command(&command).await?;
+        if !output.starts_with("Success") {
+            return Err(DeviceError::PackageManagerError(output));
+        }
+
+        Ok(())
+    }
+
+    pub async fn list_packages(&self, third_party: bool) -> Result<Vec<String>> {
+        let command = if third_party {
+            "pm list packages -3"
+        } else {
+            "pm list packages"
+        };
+        let output = self.execute_host_shell_command(command).await?;
+        let mut packages = output
+            .lines()
+            .filter(|line| line.starts_with("package:"))
+            .map(|line| line.split_once(':').unwrap().1.to_owned())
+            .collect::<Vec<_>>();
+        packages.sort();
+        Ok(packages)
+    }
 }
 
 pub(crate) fn append_components(
