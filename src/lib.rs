@@ -318,31 +318,43 @@ impl Host {
         device_serial: Option<&T>,
         storage: AndroidStorageInput,
     ) -> Result<Device> {
-        let serials: Vec<String> = self
+        let devices: Vec<DeviceInfo> = self
             .devices::<Vec<_>>()
             .await?
             .into_iter()
             .filter(|d| d.state == DeviceState::Device)
-            .map(|d| d.serial)
             .collect();
 
         if let Some(ref serial) = device_serial
             .map(|v| v.as_ref().to_owned())
             .or_else(|| std::env::var("ANDROID_SERIAL").ok())
         {
-            if !serials.contains(serial) {
+            let device_info = devices.iter().find(|d| d.serial == *serial);
+            if let Some(device_info) = device_info {
+                return Device::new(
+                    self,
+                    device_info.serial.to_owned(),
+                    device_info.info.clone(),
+                    storage,
+                )
+                .await;
+            } else {
                 return Err(DeviceError::UnknownDevice(serial.clone()));
             }
-
-            return Device::new(self, serial.to_owned(), storage).await;
         }
 
-        if serials.len() > 1 {
+        if devices.len() > 1 {
             return Err(DeviceError::MultipleDevices);
         }
 
-        if let Some(ref serial) = serials.first() {
-            return Device::new(self, serial.to_owned().to_string(), storage).await;
+        if let Some(device) = devices.first() {
+            return Device::new(
+                self,
+                device.serial.to_owned().to_string(),
+                device.info.clone(),
+                storage,
+            )
+            .await;
         }
 
         Err(DeviceError::Adb("No Android devices are online".to_owned()))
@@ -444,6 +456,9 @@ pub struct Device {
     /// Serial number uniquely identifying this ADB device.
     pub serial: DeviceSerial,
 
+    /// Information about the device.
+    pub info: BTreeMap<String, String>,
+
     pub run_as_package: Option<String>,
 
     pub storage: AndroidStorage,
@@ -475,11 +490,13 @@ impl Device {
     pub async fn new(
         host: Host,
         serial: DeviceSerial,
+        info: BTreeMap<String, String>,
         storage: AndroidStorageInput,
     ) -> Result<Device> {
         let mut device = Device {
             host,
             serial,
+            info,
             run_as_package: None,
             storage: AndroidStorage::App,
             tempfile: UnixPathBuf::from("/data/local/tmp"),
