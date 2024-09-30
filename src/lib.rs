@@ -1184,6 +1184,10 @@ impl Device {
         }
         command.push_str(&format!(" {}", tmp_apk_path.display()));
         let output = self.execute_host_shell_command(&command).await?;
+
+        self.execute_host_shell_command(format!("rm {}", tmp_apk_path.display()).as_str())
+            .await?;
+
         if !output.starts_with("Success") {
             return Err(DeviceError::PackageManagerError(output));
         }
