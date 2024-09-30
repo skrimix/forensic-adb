@@ -1163,7 +1163,12 @@ impl Device {
         grant_runtime_permissions: bool,
     ) -> Result<()> {
         let apk_path = apk_path.to_path_buf();
-        let base_name = apk_path.file_name().unwrap().to_str().unwrap();
+
+        let base_name = apk_path
+            .file_name()
+            .ok_or(DeviceError::Adb("Invalid apk path".to_owned()))?
+            .to_str()
+            .ok_or(DeviceError::Adb("Invalid apk path".to_owned()))?;
 
         // push the apk to /data/local/tmp and run the "pm install" command
         let tmp_apk_path = UnixPathBuf::from("/data/local/tmp").join(base_name);
@@ -1206,8 +1211,14 @@ impl Device {
         let mut packages = output
             .lines()
             .filter(|line| line.starts_with("package:"))
-            .map(|line| line.split_once(':').unwrap().1.to_owned())
-            .collect::<Vec<_>>();
+            .map(|line| {
+                Ok(line
+                    .split_once(':')
+                    .ok_or(DeviceError::Adb("Failed to parse package".to_owned()))?
+                    .1
+                    .to_owned())
+            })
+            .collect::<Result<Vec<_>>>()?;
         packages.sort();
         Ok(packages)
     }
