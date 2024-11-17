@@ -22,7 +22,7 @@ use std::str::{FromStr, Utf8Error};
 use std::time::SystemTime;
 use thiserror::Error;
 use tokio::fs::File;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 pub use unix_path::{Path as UnixPath, PathBuf as UnixPathBuf};
 use uuid::Uuid;
@@ -397,6 +397,24 @@ impl Host {
     ) -> Result<String> {
         self.execute_command(&format!("host:{}", host_command), has_output, has_length)
             .await
+    }
+
+    pub async fn get_host_version(&self) -> Result<u64> {
+        let response = self.execute_host_command("version", true, true).await?;
+        if let Ok(version) = u64::from_str_radix(&response, 16) {
+            Ok(version)
+        } else {
+            Err(DeviceError::Adb("Failed to parse host version".to_owned()))
+        }
+    }
+
+    pub async fn check_host_running(&self) -> Result<()> {
+        let version = self.get_host_version().await?;
+        if version < 20 {
+            Err(DeviceError::Adb("Host version is too old".to_owned()))
+        } else {
+            Ok(())
+        }
     }
 
     pub async fn features<B: FromIterator<String>>(&self) -> Result<B> {
@@ -1115,7 +1133,8 @@ impl Device {
                 continue;
             }
 
-            let mut file = File::open(path).await?;
+            // let mut file = File::open(path).await?;
+            let mut file = BufReader::new(File::open(path).await?);
 
             let tail = path
                 .strip_prefix(source)
@@ -1172,8 +1191,8 @@ impl Device {
 
         // push the apk to /data/local/tmp and run the "pm install" command
         let tmp_apk_path = UnixPathBuf::from("/data/local/tmp").join(base_name);
-        self.push(&mut File::open(apk_path).await?, &tmp_apk_path, 0o644)
-            .await?;
+        let mut file = BufReader::new(File::open(apk_path).await?);
+        self.push(&mut file, &tmp_apk_path, 0o644).await?;
 
         let mut command = "pm install".to_owned();
         if reinstall {

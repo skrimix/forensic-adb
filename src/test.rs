@@ -110,6 +110,29 @@ where
 
 #[tokio::test]
 #[ignore]
+async fn host_get_host_version() {
+    let host = Host {
+        ..Default::default()
+    };
+
+    let version = host.get_host_version().await.expect("to get host version");
+    assert!(version > 0);
+}
+
+#[tokio::test]
+#[ignore]
+async fn host_check_host_running() {
+    let host = Host {
+        ..Default::default()
+    };
+
+    host.check_host_running()
+        .await
+        .expect("to check host running");
+}
+
+#[tokio::test]
+#[ignore]
 async fn host_features() {
     let host = Host {
         ..Default::default()
