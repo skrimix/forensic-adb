@@ -24,6 +24,7 @@ use thiserror::Error;
 use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
+use tokio::process::Command;
 pub use unix_path::{Path as UnixPath, PathBuf as UnixPathBuf};
 use uuid::Uuid;
 use walkdir::WalkDir;
@@ -358,6 +359,36 @@ impl Host {
         }
 
         Err(DeviceError::Adb("No Android devices are online".to_owned()))
+    }
+
+    pub async fn start_server(&self, adb_path: Option<&str>) -> Result<()> {
+        let adb_path = adb_path.unwrap_or("adb");
+        let mut command = Command::new(adb_path);
+        command
+            .arg("-H")
+            .arg(self.host.clone().unwrap_or("localhost".to_owned()));
+        command.arg("-P").arg(self.port.unwrap_or(5037).to_string());
+        command.arg("start-server");
+        if command.status().await?.success() {
+            Ok(())
+        } else {
+            Err(DeviceError::Adb("Failed to start adb server".to_owned()))
+        }
+    }
+
+    pub async fn kill_server(&self, adb_path: Option<&str>) -> Result<()> {
+        let adb_path = adb_path.unwrap_or("adb");
+        let mut command = Command::new(adb_path);
+        command
+            .arg("-H")
+            .arg(self.host.clone().unwrap_or("localhost".to_owned()));
+        command.arg("-P").arg(self.port.unwrap_or(5037).to_string());
+        command.arg("kill-server");
+        if command.status().await?.success() {
+            Ok(())
+        } else {
+            Err(DeviceError::Adb("Failed to kill adb server".to_owned()))
+        }
     }
 
     pub async fn connect(&self) -> Result<TcpStream> {

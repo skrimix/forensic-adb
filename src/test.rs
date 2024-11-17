@@ -109,6 +109,16 @@ where
 }
 
 #[tokio::test]
+async fn host_start_kill_server() {
+    let host = Host {
+        ..Default::default()
+    };
+
+    host.start_server(None).await.expect("to start server");
+    host.kill_server(None).await.expect("to kill server");
+}
+
+#[tokio::test]
 #[ignore]
 async fn host_get_host_version() {
     let host = Host {
