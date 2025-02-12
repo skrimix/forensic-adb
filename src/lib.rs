@@ -33,6 +33,24 @@ use crate::adb::{DeviceSerial, SyncCommand};
 
 pub type Result<T> = std::result::Result<T, DeviceError>;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum UnixFileStatus {
+    Directory = 0x4000,
+    CharacterDevice = 0x2000,
+    BlockDevice = 0x6000,
+    RegularFile = 0x8000,
+    SymbolicLink = 0xA000,
+    Socket = 0xC000,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileStatistics {
+    pub path: String,
+    pub file_mode: UnixFileStatus,
+    pub size: u32,
+    pub modified_time: SystemTime,
+}
+
 static SYNC_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"[^A-Za-z0-9_@%+=:,./-]").unwrap());
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -1204,6 +1222,72 @@ impl Device {
         let command = "usb:";
         self.execute_host_command(command, false, true).await?;
         Ok(())
+    }
+
+    pub async fn stat(&self, path: &UnixPath) -> Result<FileStatistics> {
+        // Implement the ADB protocol to get file statistics from the device
+        let mut stream = self.host.connect().await?;
+
+        // Send "host:transport" command with device serial
+        let message = encode_message(&format!("host:transport:{}", self.serial))?;
+        stream.write_all(message.as_bytes()).await?;
+        let _bytes = read_response(&mut stream, false, true).await?;
+
+        // Send "sync:" command to initialize file transfer
+        let message = encode_message("sync:")?;
+        stream.write_all(message.as_bytes()).await?;
+        let _bytes = read_response(&mut stream, false, true).await?;
+
+        // Send "STAT" command with path
+        stream.write_all(SyncCommand::Stat.code()).await?;
+        let args = format!("{}", path.display()).into_bytes();
+        write_length_little_endian(&mut stream, args.len()).await?;
+        stream.write_all(&args).await?;
+
+        // Read response
+        let mut response_code = [0u8; 4];
+        stream.read_exact(&mut response_code).await?;
+
+        if &response_code != SyncCommand::Stat.code() {
+            return Err(DeviceError::Adb(format!(
+                "Invalid response code: {:?}",
+                std::str::from_utf8(&response_code)
+            )));
+        }
+
+        // Read the 12 bytes containing mode (4), size (4), and time (4)
+        let mut stat_data = [0u8; 12];
+        stream.read_exact(&mut stat_data).await?;
+
+        // Parse the data
+        let mode = u32::from_le_bytes(stat_data[0..4].try_into().unwrap());
+        let size = u32::from_le_bytes(stat_data[4..8].try_into().unwrap());
+        let time = u32::from_le_bytes(stat_data[8..12].try_into().unwrap());
+
+        // Mode 0 indicates file not found
+        if mode == 0 {
+            return Err(DeviceError::Adb(
+                "adb: stat failed: No such file or directory".to_owned(),
+            ));
+        }
+
+        // Convert mode to UnixFileStatus
+        let file_mode = match mode & 0xF000 {
+            0x4000 => UnixFileStatus::Directory,
+            0x2000 => UnixFileStatus::CharacterDevice,
+            0x6000 => UnixFileStatus::BlockDevice,
+            0x8000 => UnixFileStatus::RegularFile,
+            0xA000 => UnixFileStatus::SymbolicLink,
+            0xC000 => UnixFileStatus::Socket,
+            _ => return Err(DeviceError::Adb(format!("Unknown file mode: {:#x}", mode))),
+        };
+
+        Ok(FileStatistics {
+            path: path.display().to_string(),
+            file_mode,
+            size,
+            modified_time: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(time as u64),
+        })
     }
 
     pub async fn install_package(

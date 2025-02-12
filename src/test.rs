@@ -18,6 +18,7 @@ use serial_test::serial;
 use std::collections::BTreeSet;
 use std::panic;
 use std::path::PathBuf;
+use std::time::SystemTime;
 use tempfile::{tempdir, TempDir};
 
 #[tokio::test]
@@ -900,6 +901,102 @@ async fn device_push_and_list_dir_flat() {
     .await;
 }
 
+#[tokio::test]
+#[ignore]
+async fn device_list_packages() {
+    run_device_test(|device: &Device, _: &TempDir, _: &UnixPath| {
+        Box::pin(async {
+            let packages = device.list_packages(false).await.expect("to list packages");
+            assert!(packages.contains(&"com.android.shell".to_owned()));
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore]
+#[serial(file)]
+async fn device_stat_file() {
+    run_device_test(
+        |device: &Device, _: &TempDir, remote_root_path: &UnixPath| {
+            Box::pin(async {
+                // First create a test file
+                let content = "test content";
+                let remote_path = remote_root_path.join("stat_test.txt");
+
+                device
+                    .push(
+                        &mut tokio::io::BufReader::new(content.as_bytes()),
+                        &remote_path,
+                        0o644,
+                    )
+                    .await
+                    .expect("file has been pushed");
+
+                // Get file stats
+                let stats = device.stat(&remote_path).await.expect("to get file stats");
+
+                assert_eq!(stats.path, remote_path.display().to_string());
+                assert_eq!(stats.file_mode, UnixFileStatus::RegularFile);
+                assert_eq!(stats.size, content.len() as u32);
+                // We don't test exact modified time since it depends on system time
+                assert!(stats.modified_time > SystemTime::UNIX_EPOCH);
+            })
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore]
+#[serial(file)]
+async fn device_stat_directory() {
+    run_device_test(
+        |device: &Device, _: &TempDir, remote_root_path: &UnixPath| {
+            Box::pin(async {
+                // Create a test directory
+                let remote_dir = remote_root_path.join("stat_test_dir");
+                device
+                    .create_dir(&remote_dir)
+                    .await
+                    .expect("to create directory");
+
+                // Get directory stats
+                let stats = device
+                    .stat(&remote_dir)
+                    .await
+                    .expect("to get directory stats");
+
+                assert_eq!(stats.path, remote_dir.display().to_string());
+                assert_eq!(stats.file_mode, UnixFileStatus::Directory);
+            })
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore]
+#[serial(file)]
+async fn device_stat_nonexistent() {
+    run_device_test(
+        |device: &Device, _: &TempDir, remote_root_path: &UnixPath| {
+            Box::pin(async {
+                let nonexistent_path = remote_root_path.join("nonexistent");
+                let result = device.stat(&nonexistent_path).await;
+                assert!(result.is_err());
+                match result {
+                    Err(DeviceError::Adb(msg)) => {
+                        assert!(msg.contains("No such file or directory"));
+                    }
+                    _ => panic!("Expected Adb error for nonexistent file"),
+                }
+            })
+        },
+    )
+    .await;
+}
+
 #[test]
 fn format_own_device_error_types() {
     assert_eq!(
@@ -954,15 +1051,3 @@ fn format_own_device_error_types() {
 //     })
 //     .await;
 // }
-
-#[tokio::test]
-#[ignore]
-async fn device_list_packages() {
-    run_device_test(|device: &Device, _: &TempDir, _: &UnixPath| {
-        Box::pin(async {
-            let packages = device.list_packages(false).await.expect("to list packages");
-            assert!(packages.contains(&"com.android.shell".to_owned()));
-        })
-    })
-    .await;
-}
