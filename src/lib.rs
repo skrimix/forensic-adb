@@ -33,7 +33,7 @@ use crate::adb::{DeviceSerial, SyncCommand};
 
 pub type Result<T> = std::result::Result<T, DeviceError>;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum UnixFileStatus {
     Directory = 0x4000,
     CharacterDevice = 0x2000,
@@ -43,12 +43,13 @@ pub enum UnixFileStatus {
     Socket = 0xC000,
 }
 
-#[derive(Debug, Clone)]
-pub struct FileStatistics {
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub struct FileMetadata {
     pub path: String,
     pub file_mode: UnixFileStatus,
     pub size: u32,
-    pub modified_time: SystemTime,
+    pub modified_time: Option<SystemTime>,
+    pub depth: Option<usize>, // Used by list_dir for directory traversal
 }
 
 static SYNC_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"[^A-Za-z0-9_@%+=:,./-]").unwrap());
@@ -534,25 +535,6 @@ pub struct Device {
     pub tempfile: UnixPathBuf,
 }
 
-#[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub struct RemoteDirEntry {
-    depth: usize,
-    metadata: RemoteMetadata,
-    name: String,
-}
-
-#[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub enum RemoteMetadata {
-    RemoteFile(RemoteFileMetadata),
-    RemoteDir,
-    RemoteSymlink,
-}
-#[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub struct RemoteFileMetadata {
-    mode: usize,
-    size: usize,
-}
-
 impl Device {
     pub async fn new(
         host: Host,
@@ -825,7 +807,7 @@ impl Device {
             .and(Ok(()))
     }
 
-    pub async fn list_dir(&self, src: &UnixPath) -> Result<Vec<RemoteDirEntry>> {
+    pub async fn list_dir(&self, src: &UnixPath) -> Result<Vec<FileMetadata>> {
         let src = src.to_path_buf();
         let mut queue = vec![(src.clone(), 0, "".to_string())];
 
@@ -833,10 +815,10 @@ impl Device {
 
         while let Some((next, depth, prefix)) = queue.pop() {
             for listing in self.list_dir_flat(&next, depth, prefix).await? {
-                if listing.metadata == RemoteMetadata::RemoteDir {
+                if listing.file_mode == UnixFileStatus::Directory {
                     let mut child = src.clone();
-                    child.push(listing.name.clone());
-                    queue.push((child, depth + 1, listing.name.clone()));
+                    child.push(listing.path.clone());
+                    queue.push((child, depth + 1, listing.path.clone()));
                 }
 
                 listings.push(listing);
@@ -851,7 +833,7 @@ impl Device {
         src: &UnixPath,
         depth: usize,
         prefix: String,
-    ) -> Result<Vec<RemoteDirEntry>> {
+    ) -> Result<Vec<FileMetadata>> {
         // Implement the ADB protocol to list a directory from the device.
         let mut stream = self.host.connect().await?;
 
@@ -909,20 +891,31 @@ impl Device {
 
                 let file_type = (mode >> 13) & 0b111;
                 let metadata = match file_type {
-                    0b010 => RemoteMetadata::RemoteDir,
-                    0b100 => RemoteMetadata::RemoteFile(RemoteFileMetadata {
-                        mode: mode & 0b111111111,
-                        size,
-                    }),
-                    0b101 => RemoteMetadata::RemoteSymlink,
+                    0b010 => FileMetadata {
+                        path: name,
+                        file_mode: UnixFileStatus::Directory,
+                        size: 0,
+                        modified_time: None,
+                        depth: Some(depth),
+                    },
+                    0b100 => FileMetadata {
+                        path: name,
+                        file_mode: UnixFileStatus::RegularFile,
+                        size: size as u32,
+                        modified_time: None,
+                        depth: Some(depth),
+                    },
+                    0b101 => FileMetadata {
+                        path: name,
+                        file_mode: UnixFileStatus::SymbolicLink,
+                        size: 0,
+                        modified_time: None,
+                        depth: Some(depth),
+                    },
                     _ => return Err(DeviceError::Adb(format!("Invalid file mode {}", file_type))),
                 };
 
-                listings.push(RemoteDirEntry {
-                    name,
-                    depth,
-                    metadata,
-                });
+                listings.push(metadata);
             } else if &buf[0..4] == SyncCommand::Done.code() {
                 // "DONE" command indicates end of file transfer
                 break;
@@ -1008,22 +1001,23 @@ impl Device {
         let dest_dir = dest_dir.to_path_buf();
 
         for entry in self.list_dir(&src).await? {
-            match entry.metadata {
-                RemoteMetadata::RemoteSymlink => {} // Ignored.
-                RemoteMetadata::RemoteDir => {
+            match entry.file_mode {
+                UnixFileStatus::SymbolicLink => {} // Ignored.
+                UnixFileStatus::Directory => {
                     let mut d = dest_dir.clone();
-                    d.push(&entry.name);
+                    d.push(&entry.path);
 
                     std::fs::create_dir_all(&d)?;
                 }
-                RemoteMetadata::RemoteFile(_) => {
+                UnixFileStatus::RegularFile => {
                     let mut s = src.clone();
-                    s.push(&entry.name);
+                    s.push(&entry.path);
                     let mut d = dest_dir.clone();
-                    d.push(&entry.name);
+                    d.push(&entry.path);
 
                     self.pull(&s, &mut File::create(d).await?).await?;
                 }
+                _ => {}
             }
         }
 
@@ -1224,7 +1218,7 @@ impl Device {
         Ok(())
     }
 
-    pub async fn stat(&self, path: &UnixPath) -> Result<FileStatistics> {
+    pub async fn stat(&self, path: &UnixPath) -> Result<FileMetadata> {
         // Implement the ADB protocol to get file statistics from the device
         let mut stream = self.host.connect().await?;
 
@@ -1282,11 +1276,16 @@ impl Device {
             _ => return Err(DeviceError::Adb(format!("Unknown file mode: {:#x}", mode))),
         };
 
-        Ok(FileStatistics {
+        Ok(FileMetadata {
             path: path.display().to_string(),
             file_mode,
             size,
-            modified_time: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(time as u64),
+            modified_time: if time == 0 {
+                None
+            } else {
+                Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(time as u64))
+            },
+            depth: None,
         })
     }
 

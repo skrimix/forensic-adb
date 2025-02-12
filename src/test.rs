@@ -723,51 +723,51 @@ async fn device_push_and_list_dir() {
                     .list_dir(remote_root_path)
                     .await
                     .expect("to list_dir");
-                listings.sort();
+                listings.sort_by_key(|f| f.depth);
                 assert_eq!(
                     listings,
                     vec![
-                        RemoteDirEntry {
-                            depth: 0,
-                            name: "foo1.bar".to_string(),
-                            metadata: RemoteMetadata::RemoteFile(RemoteFileMetadata {
-                                mode: 0b110110000,
-                                size: 8
-                            })
+                        FileMetadata {
+                            path: "foo1.bar".to_string(),
+                            file_mode: UnixFileStatus::RegularFile,
+                            size: 8,
+                            modified_time: None,
+                            depth: Some(0),
                         },
-                        RemoteDirEntry {
-                            depth: 0,
-                            name: "foo2.bar".to_string(),
-                            metadata: RemoteMetadata::RemoteFile(RemoteFileMetadata {
-                                mode: 0b110110000,
-                                size: 8
-                            })
+                        FileMetadata {
+                            path: "foo2.bar".to_string(),
+                            file_mode: UnixFileStatus::RegularFile,
+                            size: 8,
+                            modified_time: None,
+                            depth: Some(0),
                         },
-                        RemoteDirEntry {
-                            depth: 0,
-                            name: "bar".to_string(),
-                            metadata: RemoteMetadata::RemoteDir
+                        FileMetadata {
+                            path: "bar".to_string(),
+                            file_mode: UnixFileStatus::Directory,
+                            size: 0,
+                            modified_time: None,
+                            depth: Some(0),
                         },
-                        RemoteDirEntry {
-                            depth: 1,
-                            name: "bar/foo3.bar".to_string(),
-                            metadata: RemoteMetadata::RemoteFile(RemoteFileMetadata {
-                                mode: 0b110110000,
-                                size: 12
-                            })
+                        FileMetadata {
+                            path: "bar/foo3.bar".to_string(),
+                            file_mode: UnixFileStatus::RegularFile,
+                            size: 12,
+                            modified_time: None,
+                            depth: Some(1),
                         },
-                        RemoteDirEntry {
-                            depth: 1,
-                            name: "bar/more".to_string(),
-                            metadata: RemoteMetadata::RemoteDir
+                        FileMetadata {
+                            path: "bar/more".to_string(),
+                            file_mode: UnixFileStatus::Directory,
+                            size: 0,
+                            modified_time: None,
+                            depth: Some(1),
                         },
-                        RemoteDirEntry {
-                            depth: 2,
-                            name: "bar/more/foo3.bar".to_string(),
-                            metadata: RemoteMetadata::RemoteFile(RemoteFileMetadata {
-                                mode: 0b110110000,
-                                size: 17
-                            })
+                        FileMetadata {
+                            path: "bar/more/foo3.bar".to_string(),
+                            file_mode: UnixFileStatus::RegularFile,
+                            size: 17,
+                            modified_time: None,
+                            depth: Some(2),
                         }
                     ]
                 );
@@ -868,30 +868,30 @@ async fn device_push_and_list_dir_flat() {
                     .list_dir_flat(remote_root_path, 7, "prefix".to_string())
                     .await
                     .expect("to list_dir_flat");
-                listings.sort();
+                listings.sort_by_key(|f| f.depth);
                 assert_eq!(
                     listings,
                     vec![
-                        RemoteDirEntry {
-                            depth: 7,
-                            metadata: RemoteMetadata::RemoteFile(RemoteFileMetadata {
-                                mode: 0b110110000,
-                                size: 4
-                            }),
-                            name: "prefix/foo1.bar".to_string(),
+                        FileMetadata {
+                            path: "prefix/foo1.bar".to_string(),
+                            file_mode: UnixFileStatus::RegularFile,
+                            size: 4,
+                            modified_time: None,
+                            depth: Some(7),
                         },
-                        RemoteDirEntry {
-                            depth: 7,
-                            metadata: RemoteMetadata::RemoteFile(RemoteFileMetadata {
-                                mode: 0b110110000,
-                                size: 4
-                            }),
-                            name: "prefix/foo2.bar".to_string(),
+                        FileMetadata {
+                            path: "prefix/foo2.bar".to_string(),
+                            file_mode: UnixFileStatus::RegularFile,
+                            size: 4,
+                            modified_time: None,
+                            depth: Some(7),
                         },
-                        RemoteDirEntry {
-                            depth: 7,
-                            metadata: RemoteMetadata::RemoteDir,
-                            name: "prefix/bar".to_string(),
+                        FileMetadata {
+                            path: "prefix/bar".to_string(),
+                            file_mode: UnixFileStatus::Directory,
+                            size: 0,
+                            modified_time: None,
+                            depth: Some(7),
                         },
                     ]
                 );
@@ -939,8 +939,9 @@ async fn device_stat_file() {
                 assert_eq!(stats.path, remote_path.display().to_string());
                 assert_eq!(stats.file_mode, UnixFileStatus::RegularFile);
                 assert_eq!(stats.size, content.len() as u32);
-                // We don't test exact modified time since it depends on system time
-                assert!(stats.modified_time > SystemTime::UNIX_EPOCH);
+                assert!(stats.modified_time.is_some());
+                assert!(stats.modified_time.unwrap() > SystemTime::UNIX_EPOCH);
+                assert_eq!(stats.depth, None);
             })
         },
     )
@@ -969,6 +970,9 @@ async fn device_stat_directory() {
 
                 assert_eq!(stats.path, remote_dir.display().to_string());
                 assert_eq!(stats.file_mode, UnixFileStatus::Directory);
+                assert!(stats.modified_time.is_some());
+                assert!(stats.modified_time.unwrap() > SystemTime::UNIX_EPOCH);
+                assert_eq!(stats.depth, None);
             })
         },
     )
