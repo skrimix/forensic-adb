@@ -1268,7 +1268,9 @@ impl Device {
             .map(|line| {
                 Ok(line
                     .split_once(':')
-                    .ok_or(DeviceError::Adb("Failed to parse package".to_owned()))?
+                    .ok_or(DeviceError::Adb(
+                        "Failed to parse package list line".to_owned(),
+                    ))?
                     .1
                     .to_owned())
             })
