@@ -19,7 +19,7 @@ use std::iter::FromIterator;
 use std::num::{ParseIntError, TryFromIntError};
 use std::path::{Component, Path};
 use std::str::{FromStr, Utf8Error};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
@@ -875,7 +875,8 @@ impl Device {
                 // A utf-8 string representing the file name.
                 let mode = read_length_little_endian(&mut stream).await?;
                 let size = read_length_little_endian(&mut stream).await?;
-                let _time = read_length_little_endian(&mut stream).await?;
+                let time = read_length_little_endian(&mut stream).await?;
+                let mod_time = SystemTime::UNIX_EPOCH + Duration::from_secs(time as u64);
                 let name_length = read_length_little_endian(&mut stream).await?;
                 stream.read_exact(&mut buf[0..name_length]).await?;
 
@@ -895,21 +896,21 @@ impl Device {
                         path: name,
                         file_mode: UnixFileStatus::Directory,
                         size: 0,
-                        modified_time: None,
+                        modified_time: Some(mod_time),
                         depth: Some(depth),
                     },
                     0b100 => FileMetadata {
                         path: name,
                         file_mode: UnixFileStatus::RegularFile,
                         size: size as u32,
-                        modified_time: None,
+                        modified_time: Some(mod_time),
                         depth: Some(depth),
                     },
                     0b101 => FileMetadata {
                         path: name,
                         file_mode: UnixFileStatus::SymbolicLink,
                         size: 0,
-                        modified_time: None,
+                        modified_time: Some(mod_time),
                         depth: Some(depth),
                     },
                     _ => return Err(DeviceError::Adb(format!("Invalid file mode {}", file_type))),

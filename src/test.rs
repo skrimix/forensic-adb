@@ -724,53 +724,89 @@ async fn device_push_and_list_dir() {
                     .await
                     .expect("to list_dir");
                 listings.sort_by_key(|f| f.depth);
-                assert_eq!(
-                    listings,
-                    vec![
-                        FileMetadata {
-                            path: "foo1.bar".to_string(),
-                            file_mode: UnixFileStatus::RegularFile,
-                            size: 8,
-                            modified_time: None,
-                            depth: Some(0),
-                        },
-                        FileMetadata {
-                            path: "foo2.bar".to_string(),
-                            file_mode: UnixFileStatus::RegularFile,
-                            size: 8,
-                            modified_time: None,
-                            depth: Some(0),
-                        },
-                        FileMetadata {
-                            path: "bar".to_string(),
-                            file_mode: UnixFileStatus::Directory,
-                            size: 0,
-                            modified_time: None,
-                            depth: Some(0),
-                        },
-                        FileMetadata {
-                            path: "bar/foo3.bar".to_string(),
-                            file_mode: UnixFileStatus::RegularFile,
-                            size: 12,
-                            modified_time: None,
-                            depth: Some(1),
-                        },
-                        FileMetadata {
-                            path: "bar/more".to_string(),
-                            file_mode: UnixFileStatus::Directory,
-                            size: 0,
-                            modified_time: None,
-                            depth: Some(1),
-                        },
-                        FileMetadata {
-                            path: "bar/more/foo3.bar".to_string(),
-                            file_mode: UnixFileStatus::RegularFile,
-                            size: 17,
-                            modified_time: None,
-                            depth: Some(2),
-                        }
-                    ]
-                );
+                // assert_eq!(
+                //     listings,
+                //     vec![
+                //         FileMetadata {
+                //             path: "foo1.bar".to_string(),
+                //             file_mode: UnixFileStatus::RegularFile,
+                //             size: 8,
+                //             modified_time: None,
+                //             depth: Some(0),
+                //         },
+                //         FileMetadata {
+                //             path: "foo2.bar".to_string(),
+                //             file_mode: UnixFileStatus::RegularFile,
+                //             size: 8,
+                //             modified_time: None,
+                //             depth: Some(0),
+                //         },
+                //         FileMetadata {
+                //             path: "bar".to_string(),
+                //             file_mode: UnixFileStatus::Directory,
+                //             size: 0,
+                //             modified_time: None,
+                //             depth: Some(0),
+                //         },
+                //         FileMetadata {
+                //             path: "bar/foo3.bar".to_string(),
+                //             file_mode: UnixFileStatus::RegularFile,
+                //             size: 12,
+                //             modified_time: None,
+                //             depth: Some(1),
+                //         },
+                //         FileMetadata {
+                //             path: "bar/more".to_string(),
+                //             file_mode: UnixFileStatus::Directory,
+                //             size: 0,
+                //             modified_time: None,
+                //             depth: Some(1),
+                //         },
+                //         FileMetadata {
+                //             path: "bar/more/foo3.bar".to_string(),
+                //             file_mode: UnixFileStatus::RegularFile,
+                //             size: 17,
+                //             modified_time: None,
+                //             depth: Some(2),
+                //         }
+                //     ]
+                // );
+                assert_eq!(listings.len(), 6);
+
+                assert_eq!(listings[0].path, "foo1.bar");
+                assert_eq!(listings[1].path, "foo2.bar");
+                assert_eq!(listings[2].path, "bar");
+                assert_eq!(listings[3].path, "bar/foo3.bar");
+                assert_eq!(listings[4].path, "bar/more");
+                assert_eq!(listings[5].path, "bar/more/foo3.bar");
+
+                assert_eq!(listings[0].file_mode, UnixFileStatus::RegularFile);
+                assert_eq!(listings[1].file_mode, UnixFileStatus::RegularFile);
+                assert_eq!(listings[2].file_mode, UnixFileStatus::Directory);
+                assert_eq!(listings[3].file_mode, UnixFileStatus::RegularFile);
+                assert_eq!(listings[4].file_mode, UnixFileStatus::Directory);
+                assert_eq!(listings[5].file_mode, UnixFileStatus::RegularFile);
+
+                assert_eq!(listings[0].size, 8);
+                assert_eq!(listings[1].size, 8);
+                assert_eq!(listings[2].size, 0);
+                assert_eq!(listings[3].size, 12);
+                assert_eq!(listings[4].size, 0);
+                assert_eq!(listings[5].size, 17);
+
+                assert!(listings[0].modified_time.unwrap() > SystemTime::UNIX_EPOCH);
+                assert!(listings[1].modified_time.unwrap() > SystemTime::UNIX_EPOCH);
+                assert!(listings[2].modified_time.unwrap() > SystemTime::UNIX_EPOCH);
+                assert!(listings[3].modified_time.unwrap() > SystemTime::UNIX_EPOCH);
+                assert!(listings[4].modified_time.unwrap() > SystemTime::UNIX_EPOCH);
+                assert!(listings[5].modified_time.unwrap() > SystemTime::UNIX_EPOCH);
+
+                assert_eq!(listings[0].depth, Some(0));
+                assert_eq!(listings[1].depth, Some(0));
+                assert_eq!(listings[2].depth, Some(0));
+                assert_eq!(listings[3].depth, Some(1));
+                assert_eq!(listings[4].depth, Some(1));
+                assert_eq!(listings[5].depth, Some(2));
             })
         },
     )
@@ -869,32 +905,48 @@ async fn device_push_and_list_dir_flat() {
                     .await
                     .expect("to list_dir_flat");
                 listings.sort_by_key(|f| f.depth);
-                assert_eq!(
-                    listings,
-                    vec![
-                        FileMetadata {
-                            path: "prefix/foo1.bar".to_string(),
-                            file_mode: UnixFileStatus::RegularFile,
-                            size: 4,
-                            modified_time: None,
-                            depth: Some(7),
-                        },
-                        FileMetadata {
-                            path: "prefix/foo2.bar".to_string(),
-                            file_mode: UnixFileStatus::RegularFile,
-                            size: 4,
-                            modified_time: None,
-                            depth: Some(7),
-                        },
-                        FileMetadata {
-                            path: "prefix/bar".to_string(),
-                            file_mode: UnixFileStatus::Directory,
-                            size: 0,
-                            modified_time: None,
-                            depth: Some(7),
-                        },
-                    ]
-                );
+                // assert_eq!(
+                //     listings,
+                //     vec![
+                //         FileMetadata {
+                //             path: "prefix/foo1.bar".to_string(),
+                //             file_mode: UnixFileStatus::RegularFile,
+                //             size: 4,
+                //             modified_time: None,
+                //             depth: Some(7),
+                //         },
+                //         FileMetadata {
+                //             path: "prefix/foo2.bar".to_string(),
+                //             file_mode: UnixFileStatus::RegularFile,
+                //             size: 4,
+                //             modified_time: None,
+                //             depth: Some(7),
+                //         },
+                //         FileMetadata {
+                //             path: "prefix/bar".to_string(),
+                //             file_mode: UnixFileStatus::Directory,
+                //             size: 0,
+                //             modified_time: None,
+                //             depth: Some(7),
+                //         },
+                //     ]
+                // );
+                assert_eq!(listings.len(), 3);
+                assert_eq!(listings[0].path, "prefix/foo1.bar");
+                assert_eq!(listings[1].path, "prefix/foo2.bar");
+                assert_eq!(listings[2].path, "prefix/bar");
+                assert_eq!(listings[0].file_mode, UnixFileStatus::RegularFile);
+                assert_eq!(listings[1].file_mode, UnixFileStatus::RegularFile);
+                assert_eq!(listings[2].file_mode, UnixFileStatus::Directory);
+                assert_eq!(listings[0].size, 4);
+                assert_eq!(listings[1].size, 4);
+                assert_eq!(listings[2].size, 0);
+                assert!(listings[0].modified_time.unwrap() > SystemTime::UNIX_EPOCH);
+                assert!(listings[1].modified_time.unwrap() > SystemTime::UNIX_EPOCH);
+                assert!(listings[2].modified_time.unwrap() > SystemTime::UNIX_EPOCH);
+                assert_eq!(listings[0].depth, Some(7));
+                assert_eq!(listings[1].depth, Some(7));
+                assert_eq!(listings[2].depth, Some(7));
             })
         },
     )
