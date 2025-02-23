@@ -854,7 +854,7 @@ impl Device {
         write_length_little_endian(&mut stream, args.len()).await?;
         stream.write_all(args).await?;
 
-        // Use the maximum 64KB buffer to transfer the file contents.
+        // Use the maximum 64K buffer to transfer the file contents.
         let mut buf = [0; 64 * 1024];
 
         let mut listings = Vec::new();
@@ -945,7 +945,34 @@ impl Device {
     }
 
     pub async fn pull<W: AsyncWrite + Unpin>(&self, src: &UnixPath, buffer: &mut W) -> Result<()> {
-        // Implement the ADB protocol to receive a file from the device.
+        self.pull_internal(src, buffer, None, None).await
+    }
+
+    pub async fn pull_with_progress<W: AsyncWrite + Unpin>(
+        &self,
+        src: &UnixPath,
+        buffer: &mut W,
+        total_bytes: u64,
+        progress_sender: tokio::sync::mpsc::UnboundedSender<FileTransferProgress>,
+    ) -> Result<()> {
+        self.pull_internal(src, buffer, Some(total_bytes), Some(progress_sender))
+            .await
+    }
+
+    async fn pull_internal<W: AsyncWrite + Unpin>(
+        &self,
+        src: &UnixPath,
+        buffer: &mut W,
+        total_bytes: Option<u64>,
+        progress_sender: Option<tokio::sync::mpsc::UnboundedSender<FileTransferProgress>>,
+    ) -> Result<()> {
+        if let (Some(total), Some(sender)) = (total_bytes, &progress_sender) {
+            let _ = sender.send(FileTransferProgress {
+                total_bytes: total,
+                transferred_bytes: 0,
+            });
+        }
+
         let mut stream = self.host.connect().await?;
 
         // Send "host:transport" command with device serial
@@ -965,8 +992,10 @@ impl Device {
         write_length_little_endian(&mut stream, args.len()).await?;
         stream.write_all(args).await?;
 
-        // Use the maximum 64KB buffer to transfer the file contents.
+        // Use the maximum 64K buffer to transfer the file contents.
         let mut buf = [0; 64 * 1024];
+        let mut transferred = 0u64;
+        let mut last_progress = 0u64;
 
         // Read "DATA" command one or more times for the file content
         loop {
@@ -976,8 +1005,27 @@ impl Device {
                 let len = read_length_little_endian(&mut stream).await?;
                 stream.read_exact(&mut buf[0..len]).await?;
                 buffer.write_all(&buf[0..len]).await?;
+
+                transferred += len as u64;
+
+                // Send progress every 1M if progress reporting is enabled
+                if let Some(sender) = &progress_sender {
+                    if transferred - last_progress >= 1024 * 1024 {
+                        let _ = sender.send(FileTransferProgress {
+                            total_bytes: total_bytes.unwrap_or(0),
+                            transferred_bytes: transferred,
+                        });
+                        last_progress = transferred;
+                    }
+                }
             } else if &buf[0..4] == SyncCommand::Done.code() {
                 // "DONE" command indicates end of file transfer
+                if let Some(sender) = &progress_sender {
+                    let _ = sender.send(FileTransferProgress {
+                        total_bytes: total_bytes.unwrap_or(0),
+                        transferred_bytes: transferred,
+                    });
+                }
                 break;
             } else if &buf[0..4] == SyncCommand::Fail.code() {
                 let n = buf.len().min(read_length_little_endian(&mut stream).await?);
@@ -998,16 +1046,53 @@ impl Device {
     }
 
     pub async fn pull_dir(&self, src: &UnixPath, dest_dir: &Path) -> Result<()> {
+        self.pull_dir_internal(src, dest_dir, None).await
+    }
+
+    async fn pull_dir_internal(
+        &self,
+        src: &UnixPath,
+        dest_dir: &Path,
+        progress_sender: Option<tokio::sync::mpsc::UnboundedSender<DirectoryTransferProgress>>,
+    ) -> Result<()> {
         let src = src.to_path_buf();
         let dest_dir = dest_dir.to_path_buf();
 
+        // Get totals first
+        let mut total_files = 0usize;
+        let mut total_bytes = 0u64;
+        for entry in self.list_dir(&src).await? {
+            if entry.file_mode == UnixFileStatus::RegularFile {
+                total_files += 1;
+                total_bytes += entry.size as u64;
+            }
+        }
+
+        // Send initial progress if progress reporting is enabled
+        if let Some(sender) = &progress_sender {
+            let _ = sender.send(DirectoryTransferProgress {
+                directory_name: Some(src.display().to_string()),
+                total_files,
+                transferred_files: 0,
+                total_bytes,
+                transferred_bytes: 0,
+                current_file: None,
+                current_file_progress: FileTransferProgress {
+                    total_bytes: 0,
+                    transferred_bytes: 0,
+                },
+            });
+        }
+
+        let mut transferred_files = 0usize;
+        let mut transferred_bytes = 0u64;
+
         for entry in self.list_dir(&src).await? {
             match entry.file_mode {
-                UnixFileStatus::SymbolicLink => {} // Ignored.
+                UnixFileStatus::SymbolicLink => {} // Ignored
                 UnixFileStatus::Directory => {
                     let mut d = dest_dir.clone();
                     d.push(&entry.path);
-
                     std::fs::create_dir_all(&d)?;
                 }
                 UnixFileStatus::RegularFile => {
@@ -1016,7 +1101,61 @@ impl Device {
                     let mut d = dest_dir.clone();
                     d.push(&entry.path);
 
-                    self.pull(&s, &mut File::create(d).await?).await?;
+                    let file_size = entry.size as u64;
+
+                    // Create a channel for file progress if directory progress is enabled
+                    let (file_sender, mut file_receiver) = if progress_sender.is_some() {
+                        let (s, r) = tokio::sync::mpsc::unbounded_channel();
+                        (Some(s), Some(r))
+                    } else {
+                        (None, None)
+                    };
+
+                    // Send directory progress with current file
+                    if let Some(sender) = &progress_sender {
+                        let _ = sender.send(DirectoryTransferProgress {
+                            directory_name: None,
+                            total_files,
+                            transferred_files,
+                            total_bytes,
+                            transferred_bytes,
+                            current_file: Some(s.display().to_string()),
+                            current_file_progress: FileTransferProgress {
+                                total_bytes: file_size,
+                                transferred_bytes: 0,
+                            },
+                        });
+
+                        // Spawn a task to handle file progress updates if progress reporting is enabled
+                        if let Some(mut receiver) = file_receiver.take() {
+                            let sender = sender.clone();
+                            tokio::spawn(async move {
+                                while let Some(file_progress) = receiver.recv().await {
+                                    let _ = sender.send(DirectoryTransferProgress {
+                                        directory_name: None,
+                                        total_files,
+                                        transferred_files,
+                                        total_bytes,
+                                        transferred_bytes,
+                                        current_file: None,
+                                        current_file_progress: file_progress,
+                                    });
+                                }
+                            });
+                        }
+                    }
+
+                    // Pull file with progress if enabled
+                    self.pull_internal(
+                        &s,
+                        &mut File::create(&d).await?,
+                        Some(file_size),
+                        file_sender,
+                    )
+                    .await?;
+
+                    transferred_files += 1;
+                    transferred_bytes += file_size;
                 }
                 _ => {}
             }
@@ -1031,6 +1170,29 @@ impl Device {
         dest: &UnixPath,
         mode: u32,
     ) -> Result<()> {
+        self.push_internal(buffer, dest, mode, None, None).await
+    }
+
+    pub async fn push_with_progress<R: AsyncRead + Unpin>(
+        &self,
+        buffer: &mut R,
+        dest: &UnixPath,
+        mode: u32,
+        total_bytes: u64,
+        progress_sender: tokio::sync::mpsc::UnboundedSender<FileTransferProgress>,
+    ) -> Result<()> {
+        self.push_internal(buffer, dest, mode, Some(total_bytes), Some(progress_sender))
+            .await
+    }
+
+    async fn push_internal<R: AsyncRead + Unpin>(
+        &self,
+        buffer: &mut R,
+        dest: &UnixPath,
+        mode: u32,
+        total_bytes: Option<u64>,
+        progress_sender: Option<tokio::sync::mpsc::UnboundedSender<FileTransferProgress>>,
+    ) -> Result<()> {
         // Implement the ADB protocol to send a file to the device.
         // The protocol consists of the following steps:
         // * Send "host:transport" command with device serial
@@ -1038,6 +1200,12 @@ impl Device {
         // * Send "SEND" command with name and mode of the file
         // * Send "DATA" command one or more times for the file content
         // * Send "DONE" command to indicate end of file transfer
+        if let (Some(total), Some(sender)) = (total_bytes, &progress_sender) {
+            let _ = sender.send(FileTransferProgress {
+                total_bytes: total,
+                transferred_bytes: 0,
+            });
+        }
 
         let enable_run_as = self.enable_run_as_for_path(&dest.to_path_buf());
         let dest1 = match enable_run_as {
@@ -1095,20 +1263,40 @@ impl Device {
         write_length_little_endian(&mut stream, args.len()).await?;
         stream.write_all(args).await?;
 
-        // Use a 32KB buffer to transfer the file contents
-        // TODO: Maybe adjust to maxdata (256KB)
+        // Use a 32K buffer to transfer the file contents
+        // TODO: Maybe adjust to maxdata (256K)
         let mut buf = [0; 32 * 1024];
+        let mut transferred = 0u64;
+        let mut last_progress = 0u64;
 
         loop {
             let len = buffer.read(&mut buf).await?;
-
             if len == 0 {
+                if let Some(sender) = &progress_sender {
+                    let _ = sender.send(FileTransferProgress {
+                        total_bytes: total_bytes.unwrap_or(0),
+                        transferred_bytes: transferred,
+                    });
+                }
                 break;
             }
 
             stream.write_all(SyncCommand::Data.code()).await?;
             write_length_little_endian(&mut stream, len).await?;
             stream.write_all(&buf[0..len]).await?;
+
+            transferred += len as u64;
+
+            // Send progress every 1M if progress reporting is enabled
+            if let Some(sender) = &progress_sender {
+                if transferred - last_progress >= 1024 * 1024 {
+                    let _ = sender.send(FileTransferProgress {
+                        total_bytes: total_bytes.unwrap_or(0),
+                        transferred_bytes: transferred,
+                    });
+                    last_progress = transferred;
+                }
+            }
         }
 
         // https://android.googlesource.com/platform/system/core/+/master/adb/SYNC.TXT#66
@@ -1165,10 +1353,50 @@ impl Device {
     }
 
     pub async fn push_dir(&self, source: &Path, dest_dir: &UnixPath, mode: u32) -> Result<()> {
+        self.push_dir_internal(source, dest_dir, mode, None).await
+    }
+
+    async fn push_dir_internal(
+        &self,
+        source: &Path,
+        dest_dir: &UnixPath,
+        mode: u32,
+        progress_sender: Option<tokio::sync::mpsc::UnboundedSender<DirectoryTransferProgress>>,
+    ) -> Result<()> {
         debug!("Pushing {} to {}", source.display(), dest_dir.display());
 
+        // Calculate totals first
+        let mut total_files = 0usize;
+        let mut total_bytes = 0u64;
         let walker = WalkDir::new(source).follow_links(false).into_iter();
+        for entry in walker {
+            let entry = entry?;
+            if entry.metadata()?.is_file() {
+                total_files += 1;
+                total_bytes += entry.metadata()?.len();
+            }
+        }
 
+        // Send initial progress if progress reporting is enabled
+        if let Some(sender) = &progress_sender {
+            let _ = sender.send(DirectoryTransferProgress {
+                directory_name: Some(dest_dir.display().to_string()),
+                total_files,
+                transferred_files: 0,
+                total_bytes,
+                transferred_bytes: 0,
+                current_file: None,
+                current_file_progress: FileTransferProgress {
+                    total_bytes: 0,
+                    transferred_bytes: 0,
+                },
+            });
+        }
+
+        let mut transferred_files = 0usize;
+        let mut transferred_bytes = 0u64;
+
+        let walker = WalkDir::new(source).follow_links(false).into_iter();
         for entry in walker {
             let entry = entry?;
             let path = entry.path();
@@ -1177,7 +1405,7 @@ impl Device {
                 continue;
             }
 
-            // let mut file = File::open(path).await?;
+            let file_size = entry.metadata()?.len();
             let mut file = BufReader::new(File::open(path).await?);
 
             let tail = path
@@ -1185,10 +1413,79 @@ impl Device {
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
             let dest = append_components(dest_dir, tail)?;
-            self.push(&mut file, &dest, mode).await?;
+
+            // Create a channel for file progress if directory progress is enabled
+            let (file_sender, mut file_receiver) = if progress_sender.is_some() {
+                let (s, r) = tokio::sync::mpsc::unbounded_channel();
+                (Some(s), Some(r))
+            } else {
+                (None, None)
+            };
+
+            // Send directory progress with current file
+            if let Some(sender) = &progress_sender {
+                let _ = sender.send(DirectoryTransferProgress {
+                    directory_name: None,
+                    total_files,
+                    transferred_files,
+                    total_bytes,
+                    transferred_bytes,
+                    current_file: Some(dest.display().to_string()),
+                    current_file_progress: FileTransferProgress {
+                        total_bytes: file_size,
+                        transferred_bytes: 0,
+                    },
+                });
+
+                // Spawn a task to handle file progress updates if progress reporting is enabled
+                if let Some(mut receiver) = file_receiver.take() {
+                    let sender = sender.clone();
+                    tokio::spawn(async move {
+                        while let Some(file_progress) = receiver.recv().await {
+                            let _ = sender.send(DirectoryTransferProgress {
+                                directory_name: None,
+                                total_files,
+                                transferred_files,
+                                total_bytes,
+                                transferred_bytes,
+                                current_file: None,
+                                current_file_progress: file_progress,
+                            });
+                        }
+                    });
+                }
+            }
+
+            // Push file with progress if enabled
+            self.push_internal(&mut file, &dest, mode, Some(file_size), file_sender)
+                .await?;
+
+            transferred_files += 1;
+            transferred_bytes += file_size;
         }
 
         Ok(())
+    }
+
+    pub async fn push_dir_with_progress(
+        &self,
+        source: &Path,
+        dest_dir: &UnixPath,
+        mode: u32,
+        progress_sender: tokio::sync::mpsc::UnboundedSender<DirectoryTransferProgress>,
+    ) -> Result<()> {
+        self.push_dir_internal(source, dest_dir, mode, Some(progress_sender))
+            .await
+    }
+
+    pub async fn pull_dir_with_progress(
+        &self,
+        src: &UnixPath,
+        dest_dir: &Path,
+        progress_sender: tokio::sync::mpsc::UnboundedSender<DirectoryTransferProgress>,
+    ) -> Result<()> {
+        self.pull_dir_internal(src, dest_dir, Some(progress_sender))
+            .await
     }
 
     pub async fn remove(&self, path: &UnixPath) -> Result<()> {
@@ -1388,4 +1685,21 @@ pub(crate) fn append_components(
     }
 
     Ok(buf)
+}
+
+#[derive(Debug, Clone)]
+pub struct FileTransferProgress {
+    pub total_bytes: u64,
+    pub transferred_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DirectoryTransferProgress {
+    pub directory_name: Option<String>,
+    pub total_files: usize,
+    pub transferred_files: usize,
+    pub total_bytes: u64,
+    pub transferred_bytes: u64,
+    pub current_file: Option<String>,
+    pub current_file_progress: FileTransferProgress,
 }
