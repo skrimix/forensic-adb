@@ -19,17 +19,21 @@ use std::iter::FromIterator;
 use std::num::{ParseIntError, TryFromIntError};
 use std::path::{Component, Path};
 use std::str::{FromStr, Utf8Error};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration as StdDuration, SystemTime};
 use thiserror::Error;
 use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::process::Command;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::time::{timeout, Duration};
 pub use unix_path::{Path as UnixPath, PathBuf as UnixPathBuf};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::adb::{DeviceSerial, SyncCommand};
+
+const ADB_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub type Result<T> = std::result::Result<T, DeviceError>;
 
@@ -108,6 +112,8 @@ pub enum DeviceError {
     WalkDir(#[from] walkdir::Error),
     #[error("Package manager returned an error: {0}")]
     PackageManagerError(String),
+    #[error("Timed out while opening ADB connection")]
+    ConnectTimeout,
 }
 
 fn encode_message(payload: &str) -> Result<String> {
@@ -411,12 +417,18 @@ impl Host {
     }
 
     pub async fn connect(&self) -> Result<TcpStream> {
-        let stream = TcpStream::connect(format!(
+        let addr = format!(
             "{}:{}",
             self.host.clone().unwrap_or_else(|| "localhost".to_owned()),
             self.port.unwrap_or(5037)
-        ))
-        .await?;
+        );
+
+        let stream = timeout(ADB_CONNECT_TIMEOUT, TcpStream::connect(&addr))
+            .await
+            .map_err(|_| DeviceError::ConnectTimeout)??;
+
+        stream.set_nodelay(true)?;
+
         Ok(stream)
     }
 
@@ -876,7 +888,7 @@ impl Device {
                 let mode = read_length_little_endian(&mut stream).await?;
                 let size = read_length_little_endian(&mut stream).await?;
                 let time = read_length_little_endian(&mut stream).await?;
-                let mod_time = SystemTime::UNIX_EPOCH + Duration::from_secs(time as u64);
+                let mod_time = SystemTime::UNIX_EPOCH + StdDuration::from_secs(time as u64);
                 let name_length = read_length_little_endian(&mut stream).await?;
                 stream.read_exact(&mut buf[0..name_length]).await?;
 
@@ -953,7 +965,7 @@ impl Device {
         src: &UnixPath,
         buffer: &mut W,
         total_bytes: u64,
-        progress_sender: tokio::sync::mpsc::UnboundedSender<FileTransferProgress>,
+        progress_sender: UnboundedSender<FileTransferProgress>,
     ) -> Result<()> {
         self.pull_internal(src, buffer, Some(total_bytes), Some(progress_sender))
             .await
@@ -964,7 +976,7 @@ impl Device {
         src: &UnixPath,
         buffer: &mut W,
         total_bytes: Option<u64>,
-        progress_sender: Option<tokio::sync::mpsc::UnboundedSender<FileTransferProgress>>,
+        progress_sender: Option<UnboundedSender<FileTransferProgress>>,
     ) -> Result<()> {
         if let (Some(total), Some(sender)) = (total_bytes, &progress_sender) {
             let _ = sender.send(FileTransferProgress {
@@ -1053,7 +1065,7 @@ impl Device {
         &self,
         src: &UnixPath,
         dest_dir: &Path,
-        progress_sender: Option<tokio::sync::mpsc::UnboundedSender<DirectoryTransferProgress>>,
+        progress_sender: Option<UnboundedSender<DirectoryTransferProgress>>,
     ) -> Result<()> {
         let src = src.to_path_buf();
         let dest_dir = dest_dir.to_path_buf();
@@ -1104,12 +1116,14 @@ impl Device {
                     let file_size = entry.size as u64;
 
                     // Create a channel for file progress if directory progress is enabled
-                    let (file_sender, mut file_receiver) = if progress_sender.is_some() {
-                        let (s, r) = tokio::sync::mpsc::unbounded_channel();
-                        (Some(s), Some(r))
-                    } else {
-                        (None, None)
-                    };
+                    let (file_sender, mut file_receiver): (
+                        Option<UnboundedSender<FileTransferProgress>>,
+                        Option<UnboundedReceiver<FileTransferProgress>>,
+                    ) = progress_sender
+                        .as_ref()
+                        .map(|_| tokio::sync::mpsc::unbounded_channel())
+                        .map(|(s, r)| (Some(s), Some(r)))
+                        .unwrap_or((None, None));
 
                     // Send directory progress with current file
                     if let Some(sender) = &progress_sender {
@@ -1119,7 +1133,7 @@ impl Device {
                             transferred_files,
                             total_bytes,
                             transferred_bytes,
-                            current_file: Some(s.display().to_string()),
+                            current_file: Some(d.display().to_string()),
                             current_file_progress: FileTransferProgress {
                                 total_bytes: file_size,
                                 transferred_bytes: 0,
@@ -1136,7 +1150,8 @@ impl Device {
                                         total_files,
                                         transferred_files,
                                         total_bytes,
-                                        transferred_bytes,
+                                        transferred_bytes: transferred_bytes
+                                            + file_progress.transferred_bytes,
                                         current_file: None,
                                         current_file_progress: file_progress,
                                     });
@@ -1179,7 +1194,7 @@ impl Device {
         dest: &UnixPath,
         mode: u32,
         total_bytes: u64,
-        progress_sender: tokio::sync::mpsc::UnboundedSender<FileTransferProgress>,
+        progress_sender: UnboundedSender<FileTransferProgress>,
     ) -> Result<()> {
         self.push_internal(buffer, dest, mode, Some(total_bytes), Some(progress_sender))
             .await
@@ -1191,7 +1206,7 @@ impl Device {
         dest: &UnixPath,
         mode: u32,
         total_bytes: Option<u64>,
-        progress_sender: Option<tokio::sync::mpsc::UnboundedSender<FileTransferProgress>>,
+        progress_sender: Option<UnboundedSender<FileTransferProgress>>,
     ) -> Result<()> {
         // Implement the ADB protocol to send a file to the device.
         // The protocol consists of the following steps:
@@ -1272,6 +1287,7 @@ impl Device {
         loop {
             let len = buffer.read(&mut buf).await?;
             if len == 0 {
+                // We're done, send the final progress update
                 if let Some(sender) = &progress_sender {
                     let _ = sender.send(FileTransferProgress {
                         total_bytes: total_bytes.unwrap_or(0),
@@ -1361,7 +1377,7 @@ impl Device {
         source: &Path,
         dest_dir: &UnixPath,
         mode: u32,
-        progress_sender: Option<tokio::sync::mpsc::UnboundedSender<DirectoryTransferProgress>>,
+        progress_sender: Option<UnboundedSender<DirectoryTransferProgress>>,
     ) -> Result<()> {
         debug!("Pushing {} to {}", source.display(), dest_dir.display());
 
@@ -1415,12 +1431,14 @@ impl Device {
             let dest = append_components(dest_dir, tail)?;
 
             // Create a channel for file progress if directory progress is enabled
-            let (file_sender, mut file_receiver) = if progress_sender.is_some() {
-                let (s, r) = tokio::sync::mpsc::unbounded_channel();
-                (Some(s), Some(r))
-            } else {
-                (None, None)
-            };
+            let (file_sender, mut file_receiver): (
+                Option<UnboundedSender<FileTransferProgress>>,
+                Option<UnboundedReceiver<FileTransferProgress>>,
+            ) = progress_sender
+                .as_ref()
+                .map(|_| tokio::sync::mpsc::unbounded_channel())
+                .map(|(s, r)| (Some(s), Some(r)))
+                .unwrap_or((None, None));
 
             // Send directory progress with current file
             if let Some(sender) = &progress_sender {
@@ -1447,7 +1465,8 @@ impl Device {
                                 total_files,
                                 transferred_files,
                                 total_bytes,
-                                transferred_bytes,
+                                transferred_bytes: transferred_bytes
+                                    + file_progress.transferred_bytes,
                                 current_file: None,
                                 current_file_progress: file_progress,
                             });
@@ -1472,7 +1491,7 @@ impl Device {
         source: &Path,
         dest_dir: &UnixPath,
         mode: u32,
-        progress_sender: tokio::sync::mpsc::UnboundedSender<DirectoryTransferProgress>,
+        progress_sender: UnboundedSender<DirectoryTransferProgress>,
     ) -> Result<()> {
         self.push_dir_internal(source, dest_dir, mode, Some(progress_sender))
             .await
@@ -1482,7 +1501,7 @@ impl Device {
         &self,
         src: &UnixPath,
         dest_dir: &Path,
-        progress_sender: tokio::sync::mpsc::UnboundedSender<DirectoryTransferProgress>,
+        progress_sender: UnboundedSender<DirectoryTransferProgress>,
     ) -> Result<()> {
         self.pull_dir_internal(src, dest_dir, Some(progress_sender))
             .await
@@ -1581,7 +1600,7 @@ impl Device {
             modified_time: if time == 0 {
                 None
             } else {
-                Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(time as u64))
+                Some(SystemTime::UNIX_EPOCH + StdDuration::from_secs(time as u64))
             },
             depth: None,
         })
