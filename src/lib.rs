@@ -972,9 +972,11 @@ impl Device {
         &self,
         src: &UnixPath,
         buffer: &mut W,
-        total_bytes: u64,
         progress_sender: UnboundedSender<FileTransferProgress>,
     ) -> Result<()> {
+        let metadata = self.stat(src).await?;
+        let total_bytes = metadata.size as u64;
+
         self.pull_internal(src, buffer, Some(total_bytes), Some(progress_sender))
             .await
     }
