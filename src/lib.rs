@@ -1653,6 +1653,67 @@ impl Device {
         Ok(())
     }
 
+    pub async fn install_package_with_progress(
+        &self,
+        apk_path: &Path,
+        reinstall: bool,
+        grant_runtime_permissions: bool,
+        progress_sender: UnboundedSender<f32>,
+    ) -> Result<()> {
+        let apk_path = apk_path.to_path_buf();
+
+        let base_name = apk_path
+            .file_name()
+            .ok_or(DeviceError::Adb("Invalid apk path".to_owned()))?
+            .to_str()
+            .ok_or(DeviceError::Adb("Invalid apk path".to_owned()))?;
+
+        let file_metadata = std::fs::metadata(&apk_path)?;
+        let file_size = file_metadata.len();
+
+        let (push_sender, mut push_receiver) =
+            tokio::sync::mpsc::unbounded_channel::<FileTransferProgress>();
+
+        tokio::spawn({
+            let progress_sender = progress_sender.clone();
+            async move {
+                while let Some(push_progress) = push_receiver.recv().await {
+                    // Map push progress to install progress (up to 90%)
+                    let _ = progress_sender
+                        .send((push_progress.transferred_bytes as f32 / file_size as f32) * 0.9);
+                }
+            }
+        });
+
+        let tmp_apk_path = UnixPathBuf::from("/data/local/tmp").join(base_name);
+        let mut file = BufReader::new(File::open(&apk_path).await?);
+        self.push_with_progress(&mut file, &tmp_apk_path, 0o644, file_size, push_sender)
+            .await?;
+
+        let _ = progress_sender.send(0.9);
+
+        let mut command = "pm install".to_owned();
+        if reinstall {
+            command.push_str(" -r");
+        }
+        if grant_runtime_permissions {
+            command.push_str(" -g");
+        }
+        command.push_str(&format!(" {}", tmp_apk_path.display()));
+        let output = self.execute_host_shell_command(&command).await?;
+
+        self.execute_host_shell_command(format!("rm {}", tmp_apk_path.display()).as_str())
+            .await?;
+
+        if !output.starts_with("Success") {
+            return Err(DeviceError::PackageManagerError(output));
+        }
+
+        let _ = progress_sender.send(1.0);
+
+        Ok(())
+    }
+
     pub async fn uninstall_package(&self, package: &str) -> Result<()> {
         let command = format!("pm uninstall {}", package);
         let output = self.execute_host_shell_command(&command).await?;
