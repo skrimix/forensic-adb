@@ -315,6 +315,15 @@ pub struct DeviceInfo {
     pub info: BTreeMap<String, String>,
 }
 
+impl From<DeviceInfo> for DeviceBrief {
+    fn from(info: DeviceInfo) -> Self {
+        DeviceBrief {
+            serial: info.serial,
+            state: info.state,
+        }
+    }
+}
+
 /// Represents a connection to an ADB host, which multiplexes the connections to
 /// individual devices.
 #[derive(Debug, Clone, PartialEq)]
@@ -514,8 +523,7 @@ impl Host {
                 if length > 0 {
                     let mut body = vec![0; length];
                     stream.read_exact(&mut body).await?;
-                    let device = parse_device_brief(std::str::from_utf8(&body)?);
-                    if let Some(device) = device {
+                    if let Some(device) = parse_device_brief(std::str::from_utf8(&body)?) {
                         yield device;
                     }
                     else {
@@ -1303,9 +1311,9 @@ impl Device {
 
             transferred += len as u64;
 
-            // Send progress every 1M if progress reporting is enabled
+            // Send progress every 4M if progress reporting is enabled
             if let Some(sender) = &progress_sender {
-                if transferred - last_progress >= 1024 * 1024 {
+                if transferred - last_progress >= 4 * 1024 * 1024 {
                     let _ = sender.send(FileTransferProgress {
                         total_bytes: total_bytes.unwrap_or(0),
                         transferred_bytes: transferred,
