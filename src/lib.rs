@@ -117,9 +117,9 @@ pub enum DeviceError {
 }
 
 fn encode_message(payload: &str) -> Result<String> {
-    let hex_length = u16::try_from(payload.len()).map(|len| format!("{:0>4X}", len))?;
+    let hex_length = u16::try_from(payload.len()).map(|len| format!("{len:0>4X}"))?;
 
-    Ok(format!("{}{}", hex_length, payload))
+    Ok(format!("{hex_length}{payload}"))
 }
 
 fn parse_device_info(line: &str) -> Option<DeviceInfo> {
@@ -214,7 +214,7 @@ async fn read_response(
         let n = bytes.len().min(read_length(stream).await?);
         stream.read_exact(&mut bytes[0..n]).await?;
 
-        let message = std::str::from_utf8(&bytes[0..n]).map(|s| format!("adb error: {}", s))?;
+        let message = std::str::from_utf8(&bytes[0..n]).map(|s| format!("adb error: {s}"))?;
 
         return Err(DeviceError::Adb(message));
     }
@@ -235,7 +235,7 @@ async fn read_response(
             // command failed. First split-off the `FAIL` and length of the message.
             response = response.split_off(8);
 
-            let message = std::str::from_utf8(&response).map(|s| format!("adb error: {}", s))?;
+            let message = std::str::from_utf8(&response).map(|s| format!("adb error: {s}"))?;
 
             return Err(DeviceError::Adb(message));
         }
@@ -466,7 +466,7 @@ impl Host {
         has_length: bool,
         has_output: bool,
     ) -> Result<String> {
-        self.execute_command(&format!("host:{}", host_command), has_output, has_length)
+        self.execute_command(&format!("host:{host_command}"), has_output, has_length)
             .await
     }
 
@@ -513,7 +513,7 @@ impl Host {
             if !bytes.starts_with(SyncCommand::Okay.code()) {
                 let n = bytes.len().min(read_length(&mut stream).await?);
                 stream.read_exact(&mut bytes[0..n]).await?;
-                let message = std::str::from_utf8(&bytes[0..n]).map(|s| format!("adb error: {}", s))?;
+                let message = std::str::from_utf8(&bytes[0..n]).map(|s| format!("adb error: {s}"))?;
                 Err(DeviceError::Adb(message))?;
             }
 
@@ -585,7 +585,7 @@ impl Device {
     }
 
     pub async fn clear_app_data(&self, package: &str) -> Result<bool> {
-        self.execute_host_shell_command(&format!("pm clear {}", package))
+        self.execute_host_shell_command(&format!("pm clear {package}"))
             .await
             .map(|v| v.contains("Success"))
     }
@@ -677,7 +677,7 @@ impl Device {
     }
 
     pub async fn execute_host_exec_out_command(&self, shell_command: &str) -> Result<Vec<u8>> {
-        self.execute_host_command(&format!("exec:{}", shell_command), true, false)
+        self.execute_host_command(&format!("exec:{shell_command}"), true, false)
             .await
     }
 
@@ -689,7 +689,7 @@ impl Device {
         // We don't want to duplicate su invocations.
         if shell_command.starts_with("su") {
             return self
-                .execute_host_command_to_string(&format!("shell:{}", shell_command), true, false)
+                .execute_host_command_to_string(&format!("shell:{shell_command}"), true, false)
                 .await;
         }
 
@@ -706,7 +706,7 @@ impl Device {
             if has_outer_quotes {
                 return self
                     .execute_host_command_to_string(
-                        &format!("shell:run-as {} {}", run_as_package, shell_command),
+                        &format!("shell:run-as {run_as_package} {shell_command}"),
                         true,
                         false,
                     )
@@ -717,7 +717,7 @@ impl Device {
                 let arg: &str = &shell_command.replace('\'', "'\"'\"'")[..];
                 return self
                     .execute_host_command_to_string(
-                        &format!("shell:run-as {} {}", run_as_package, arg),
+                        &format!("shell:run-as {run_as_package} {arg}"),
                         true,
                         false,
                     )
@@ -726,19 +726,19 @@ impl Device {
 
             return self
                 .execute_host_command_to_string(
-                    &format!("shell:run-as {} \"{}\"", run_as_package, shell_command),
+                    &format!("shell:run-as {run_as_package} \"{shell_command}\""),
                     true,
                     false,
                 )
                 .await;
         }
 
-        self.execute_host_command_to_string(&format!("shell:{}", shell_command), true, false)
+        self.execute_host_command_to_string(&format!("shell:{shell_command}"), true, false)
             .await
     }
 
     pub async fn is_app_installed(&self, package: &str) -> Result<bool> {
-        self.execute_host_shell_command(&format!("pm path {}", package))
+        self.execute_host_shell_command(&format!("pm path {package}"))
             .await
             .map(|v| v.contains("package:"))
     }
@@ -749,7 +749,7 @@ impl Device {
         activity: &str,
         am_start_args: &[T],
     ) -> Result<bool> {
-        let mut am_start = format!("am start -W -n {}/{}", package, activity);
+        let mut am_start = format!("am start -W -n {package}/{activity}");
 
         for arg in am_start_args {
             am_start.push(' ');
@@ -767,7 +767,7 @@ impl Device {
 
     pub async fn force_stop(&self, package: &str) -> Result<()> {
         debug!("Force stopping Android package: {}", package);
-        self.execute_host_shell_command(&format!("am force-stop {}", package))
+        self.execute_host_shell_command(&format!("am force-stop {package}"))
             .await
             .and(Ok(()))
     }
@@ -801,7 +801,7 @@ impl Device {
     }
 
     pub async fn reverse_port(&self, remote: u16, local: u16) -> Result<u16> {
-        let command = format!("reverse:forward:tcp:{};tcp:{}", remote, local);
+        let command = format!("reverse:forward:tcp:{remote};tcp:{local}");
         let response = self
             .execute_host_command_to_string(&command, true, false)
             .await?;
@@ -814,7 +814,7 @@ impl Device {
     }
 
     pub async fn kill_reverse_port(&self, remote: u16) -> Result<()> {
-        let command = format!("reverse:killforward:tcp:{}", remote);
+        let command = format!("reverse:killforward:tcp:{remote}");
         self.execute_host_command(&command, true, true)
             .await
             .and(Ok(()))
@@ -933,7 +933,7 @@ impl Device {
                         modified_time: Some(mod_time),
                         depth: Some(depth),
                     },
-                    _ => return Err(DeviceError::Adb(format!("Invalid file mode {}", file_type))),
+                    _ => return Err(DeviceError::Adb(format!("Invalid file mode {file_type}"))),
                 };
 
                 listings.push(metadata);
@@ -946,7 +946,7 @@ impl Device {
                 stream.read_exact(&mut buf[0..n]).await?;
 
                 let message = std::str::from_utf8(&buf[0..n])
-                    .map(|s| format!("adb error: {}", s))
+                    .map(|s| format!("adb error: {s}"))
                     .unwrap_or_else(|_| "adb error was not utf-8".into());
 
                 return Err(DeviceError::Adb(message));
@@ -1055,7 +1055,7 @@ impl Device {
                 stream.read_exact(&mut buf[0..n]).await?;
 
                 let message = std::str::from_utf8(&buf[0..n])
-                    .map(|s| format!("adb error: {}", s))
+                    .map(|s| format!("adb error: {s}"))
                     .unwrap_or_else(|_| "adb error was not utf-8".into());
 
                 return Err(DeviceError::Adb(message));
@@ -1366,7 +1366,7 @@ impl Device {
             stream.read_exact(&mut buf[0..n]).await?;
 
             let message = std::str::from_utf8(&buf[0..n])
-                .map(|s| format!("adb error: {}", s))
+                .map(|s| format!("adb error: {s}"))
                 .unwrap_or_else(|_| "adb error was not utf-8".into());
 
             Err(DeviceError::Adb(message))
@@ -1436,7 +1436,7 @@ impl Device {
 
             let tail = path
                 .strip_prefix(source)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                .map_err(|e| io::Error::other(e.to_string()))?;
 
             let dest = append_components(dest_dir, tail)?;
 
@@ -1532,7 +1532,7 @@ impl Device {
     pub async fn tcpip(self, port: u16) -> Result<()> {
         debug!("Restarting adbd in TCP mode on port {}", port);
 
-        let command = format!("tcpip:{}", port);
+        let command = format!("tcpip:{port}");
         self.execute_host_command(&command, false, true).await?;
         Ok(())
     }
@@ -1600,7 +1600,7 @@ impl Device {
             0x8000 => UnixFileStatus::RegularFile,
             0xA000 => UnixFileStatus::SymbolicLink,
             0xC000 => UnixFileStatus::Socket,
-            _ => return Err(DeviceError::Adb(format!("Unknown file mode: {:#x}", mode))),
+            _ => return Err(DeviceError::Adb(format!("Unknown file mode: {mode:#x}"))),
         };
 
         Ok(FileMetadata {
@@ -1717,7 +1717,7 @@ impl Device {
     }
 
     pub async fn uninstall_package(&self, package: &str) -> Result<()> {
-        let command = format!("pm uninstall {}", package);
+        let command = format!("pm uninstall {package}");
         let output = self.execute_host_shell_command(&command).await?;
         if !output.starts_with("Success") {
             return Err(DeviceError::PackageManagerError(output));
@@ -1760,15 +1760,13 @@ pub(crate) fn append_components(
     for component in tail.components() {
         if let Component::Normal(segment) = component {
             let utf8 = segment.to_str().ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::Other,
+                io::Error::other(
                     "Could not represent path segment as UTF-8",
                 )
             })?;
             buf.push(utf8);
         } else {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 "Unexpected path component".to_owned(),
             ));
         }
