@@ -403,6 +403,8 @@ impl Host {
             .arg(self.host.clone().unwrap_or("localhost".to_owned()));
         command.arg("-P").arg(self.port.unwrap_or(5037).to_string());
         command.arg("start-server");
+        #[cfg(target_os = "windows")]
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
         if command.status().await?.success() {
             Ok(())
         } else {
@@ -418,6 +420,8 @@ impl Host {
             .arg(self.host.clone().unwrap_or("localhost".to_owned()));
         command.arg("-P").arg(self.port.unwrap_or(5037).to_string());
         command.arg("kill-server");
+        #[cfg(target_os = "windows")]
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
         if command.status().await?.success() {
             Ok(())
         } else {
