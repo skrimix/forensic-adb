@@ -117,6 +117,9 @@ async fn host_start_kill_server() {
 
     host.start_server(None).await.expect("to start server");
     host.kill_server(None).await.expect("to kill server");
+    host.start_server(None)
+        .await
+        .expect("to start server again");
 }
 
 #[tokio::test]
@@ -131,7 +134,6 @@ async fn host_get_host_version() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn host_check_host_running() {
     let host = Host {
         ..Default::default()
@@ -143,7 +145,6 @@ async fn host_check_host_running() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn host_features() {
     let host = Host {
         ..Default::default()
@@ -158,14 +159,23 @@ async fn host_features() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn host_devices() {
     let host = Host {
         ..Default::default()
     };
 
+    let _: BTreeSet<_> = host.devices().await.expect("to query devices");
+}
+
+#[tokio::test]
+#[ignore]
+async fn host_devices_connected() {
+    let host = Host {
+        ..Default::default()
+    };
+
     let set: BTreeSet<_> = host.devices().await.expect("to query devices");
-    assert_eq!(1, set.len());
+    assert!(!set.is_empty());
 }
 
 #[tokio::test]
