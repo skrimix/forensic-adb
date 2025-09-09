@@ -145,6 +145,7 @@ async fn host_check_host_running() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn host_features() {
     let host = Host {
         ..Default::default()

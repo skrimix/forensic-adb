@@ -405,10 +405,14 @@ impl Host {
         command.arg("start-server");
         #[cfg(target_os = "windows")]
         command.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        if command.status().await?.success() {
+        let result = command.output().await?;
+        if result.status.success() {
             Ok(())
         } else {
-            Err(DeviceError::Adb("Failed to start adb server".to_owned()))
+            Err(DeviceError::Adb(format!(
+                "Failed to start adb server, stderr:\n{}",
+                String::from_utf8_lossy(&result.stderr)
+            )))
         }
     }
 
@@ -422,10 +426,19 @@ impl Host {
         command.arg("kill-server");
         #[cfg(target_os = "windows")]
         command.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        if command.status().await?.success() {
+                                            // if command.status().await?.success() {
+                                            //     Ok(())
+                                            // } else {
+                                            //     Err(DeviceError::Adb("Failed to kill adb server".to_owned()))
+                                            // }
+        let result = command.output().await?;
+        if result.status.success() {
             Ok(())
         } else {
-            Err(DeviceError::Adb("Failed to kill adb server".to_owned()))
+            Err(DeviceError::Adb(format!(
+                "Failed to kill adb server, stderr:\n{}",
+                String::from_utf8_lossy(&result.stderr)
+            )))
         }
     }
 
@@ -1763,16 +1776,12 @@ pub(crate) fn append_components(
 
     for component in tail.components() {
         if let Component::Normal(segment) = component {
-            let utf8 = segment.to_str().ok_or_else(|| {
-                io::Error::other(
-                    "Could not represent path segment as UTF-8",
-                )
-            })?;
+            let utf8 = segment
+                .to_str()
+                .ok_or_else(|| io::Error::other("Could not represent path segment as UTF-8"))?;
             buf.push(utf8);
         } else {
-            return Err(io::Error::other(
-                "Unexpected path component".to_owned(),
-            ));
+            return Err(io::Error::other("Unexpected path component".to_owned()));
         }
     }
 
