@@ -617,6 +617,16 @@ impl Device {
         Ok(())
     }
 
+    pub async fn get_android_version(&self) -> Result<u32> {
+        // Query the major Android version (e.g. 9, 10, 11, 14)
+        // ro.build.version.release may be "14" or "14.0.0"; parse the leading component.
+        let version_str = self
+            .execute_host_shell_command("getprop ro.build.version.release")
+            .await?;
+        let major = version_str.trim().split('.').next().unwrap_or("");
+        Ok(major.parse::<u32>()?)
+    }
+
     pub async fn chmod(&self, path: &UnixPath, mask: &str, recursive: bool) -> Result<()> {
         let enable_run_as = self.enable_run_as_for_path(path);
 
@@ -1286,7 +1296,16 @@ impl Device {
         }
 
         if let Some(path) = root {
-            self.chmod(path, "777", true).await?;
+            // On Android 9 (P) and earlier we adjust permissions to avoid
+            // secure_mkdirs issues. On Android 10+ chmod -R may not be permitted
+            // on some storage backends (e.g. sdcard), leading to push failures.
+            let android_version = match self.get_android_version().await {
+                Ok(version) => version,
+                Err(_) => 0,
+            };
+            if android_version < 10 {
+                self.chmod(path, "777", true).await?;
+            }
         }
 
         let mut stream = self.host.connect().await?;
