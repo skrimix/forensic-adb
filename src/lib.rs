@@ -1299,10 +1299,7 @@ impl Device {
             // On Android 9 (P) and earlier we adjust permissions to avoid
             // secure_mkdirs issues. On Android 10+ chmod -R may not be permitted
             // on some storage backends (e.g. sdcard), leading to push failures.
-            let android_version = match self.get_android_version().await {
-                Ok(version) => version,
-                Err(_) => 0,
-            };
+            let android_version: u32 = (self.get_android_version().await).unwrap_or_default();
             if android_version < 10 {
                 self.chmod(path, "777", true).await?;
             }
