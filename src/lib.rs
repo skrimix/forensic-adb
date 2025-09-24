@@ -1654,6 +1654,7 @@ impl Device {
         apk_path: &Path,
         reinstall: bool,
         grant_runtime_permissions: bool,
+        bypass_low_target_sdk_block: bool,
     ) -> Result<()> {
         let apk_path = apk_path.to_path_buf();
 
@@ -1675,6 +1676,9 @@ impl Device {
         if grant_runtime_permissions {
             command.push_str(" -g");
         }
+        if bypass_low_target_sdk_block {
+            command.push_str(" --bypass-low-target-sdk-block");
+        }
         command.push_str(&format!(" {}", tmp_apk_path.display()));
         let output = self.execute_host_shell_command(&command).await?;
 
@@ -1693,6 +1697,7 @@ impl Device {
         apk_path: &Path,
         reinstall: bool,
         grant_runtime_permissions: bool,
+        bypass_low_target_sdk_block: bool,
         progress_sender: UnboundedSender<f32>,
     ) -> Result<()> {
         let apk_path = apk_path.to_path_buf();
@@ -1733,6 +1738,9 @@ impl Device {
         }
         if grant_runtime_permissions {
             command.push_str(" -g");
+        }
+        if bypass_low_target_sdk_block {
+            command.push_str(" --bypass-low-target-sdk-block");
         }
         command.push_str(&format!(" {}", tmp_apk_path.display()));
         let output = self.execute_host_shell_command(&command).await?;
