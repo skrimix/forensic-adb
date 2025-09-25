@@ -18,7 +18,7 @@ use std::io;
 use std::iter::FromIterator;
 use std::num::{ParseIntError, TryFromIntError};
 use std::path::{Component, Path};
-use std::str::{FromStr, Utf8Error};
+use std::str::Utf8Error;
 use std::time::{Duration as StdDuration, SystemTime};
 use thiserror::Error;
 use tokio::fs::File;
@@ -57,36 +57,6 @@ pub struct FileMetadata {
 }
 
 static SYNC_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"[^A-Za-z0-9_@%+=:,./-]").unwrap());
-
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub enum AndroidStorageInput {
-    #[default]
-    Auto,
-    App,
-    Internal,
-    Sdcard,
-}
-
-impl FromStr for AndroidStorageInput {
-    type Err = DeviceError;
-
-    fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "auto" => Ok(AndroidStorageInput::Auto),
-            "app" => Ok(AndroidStorageInput::App),
-            "internal" => Ok(AndroidStorageInput::Internal),
-            "sdcard" => Ok(AndroidStorageInput::Sdcard),
-            _ => Err(DeviceError::InvalidStorage),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum AndroidStorage {
-    App,
-    Internal,
-    Sdcard,
-}
 
 #[derive(Debug, Error)]
 pub enum DeviceError {
@@ -351,7 +321,6 @@ impl Host {
     pub async fn device_or_default<T: AsRef<str>>(
         self,
         device_serial: Option<&T>,
-        storage: AndroidStorageInput,
     ) -> Result<Device> {
         let devices: Vec<DeviceInfo> = self
             .devices::<Vec<_>>()
@@ -370,7 +339,6 @@ impl Host {
                     self,
                     device_info.serial.to_owned(),
                     device_info.info.clone(),
-                    storage,
                 )
                 .await;
             } else {
@@ -383,13 +351,7 @@ impl Host {
         }
 
         if let Some(device) = devices.first() {
-            return Device::new(
-                self,
-                device.serial.to_owned().to_string(),
-                device.info.clone(),
-                storage,
-            )
-            .await;
+            return Device::new(self, device.serial.clone(), device.info.clone()).await;
         }
 
         Err(DeviceError::Adb("No Android devices are online".to_owned()))
@@ -566,8 +528,6 @@ pub struct Device {
 
     pub run_as_package: Option<String>,
 
-    pub storage: AndroidStorage,
-
     /// Cache intermediate tempfile name used in pushing via run_as.
     pub tempfile: UnixPathBuf,
 }
@@ -577,26 +537,17 @@ impl Device {
         host: Host,
         serial: DeviceSerial,
         info: BTreeMap<String, String>,
-        storage: AndroidStorageInput,
     ) -> Result<Device> {
         let mut device = Device {
             host,
             serial,
             info,
             run_as_package: None,
-            storage: AndroidStorage::App,
             tempfile: UnixPathBuf::from("/data/local/tmp"),
         };
         device
             .tempfile
             .push(Uuid::new_v4().as_hyphenated().to_string());
-
-        device.storage = match storage {
-            AndroidStorageInput::App => AndroidStorage::App,
-            AndroidStorageInput::Internal => AndroidStorage::Internal,
-            AndroidStorageInput::Sdcard => AndroidStorage::Sdcard,
-            AndroidStorageInput::Auto => AndroidStorage::Sdcard,
-        };
 
         Ok(device)
     }
@@ -1482,8 +1433,9 @@ impl Device {
         let mut files: Vec<(std::path::PathBuf, u64)> = Vec::new();
         for entry in WalkDir::new(source).follow_links(false) {
             let entry = entry?;
-            if entry.metadata()?.is_file() {
-                files.push((entry.path().to_path_buf(), entry.metadata()?.len()));
+            let metadata = entry.metadata()?;
+            if metadata.is_file() {
+                files.push((entry.path().to_path_buf(), metadata.len()));
             }
         }
         let total_files = files.len();
@@ -1640,7 +1592,7 @@ impl Device {
         Ok(())
     }
 
-    pub async fn tcpip(self, port: u16) -> Result<()> {
+    pub async fn tcpip(&self, port: u16) -> Result<()> {
         debug!("Restarting adbd in TCP mode on port {}", port);
 
         let command = format!("tcpip:{port}");
@@ -1648,7 +1600,7 @@ impl Device {
         Ok(())
     }
 
-    pub async fn usb(self) -> Result<()> {
+    pub async fn usb(&self) -> Result<()> {
         debug!("Restarting adbd in USB mode");
 
         let command = "usb:";

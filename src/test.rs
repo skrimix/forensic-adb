@@ -85,7 +85,7 @@ where
         ..Default::default()
     };
     let device = host
-        .device_or_default::<String>(None, AndroidStorageInput::Auto)
+        .device_or_default::<String>(None)
         .await
         .expect("device_or_default");
 
@@ -190,7 +190,7 @@ async fn host_device_or_default() {
     let expected_device = devices.first().expect("found a device");
 
     let device = host
-        .device_or_default::<String>(Some(&expected_device.serial), AndroidStorageInput::App)
+        .device_or_default::<String>(Some(&expected_device.serial))
         .await
         .expect("connected device with serial");
     assert_eq!(device.run_as_package, None);
@@ -205,7 +205,7 @@ async fn host_device_or_default_invalid_serial() {
         ..Default::default()
     };
 
-    host.device_or_default::<String>(Some(&"foobar".to_owned()), AndroidStorageInput::Auto)
+    host.device_or_default::<String>(Some(&"foobar".to_owned()))
         .await
         .expect_err("invalid serial");
 }
@@ -221,66 +221,10 @@ async fn host_device_or_default_no_serial() {
     let expected_device = devices.first().expect("found a device");
 
     let device = host
-        .device_or_default::<String>(None, AndroidStorageInput::Auto)
+        .device_or_default::<String>(None)
         .await
         .expect("connected device with serial");
     assert_eq!(device.serial, expected_device.serial);
-}
-
-#[tokio::test]
-#[ignore]
-async fn host_device_or_default_storage_as_app() {
-    let host = Host {
-        ..Default::default()
-    };
-
-    let device = host
-        .device_or_default::<String>(None, AndroidStorageInput::App)
-        .await
-        .expect("connected device");
-    assert_eq!(device.storage, AndroidStorage::App);
-}
-
-#[tokio::test]
-#[ignore]
-async fn host_device_or_default_storage_as_auto() {
-    let host = Host {
-        ..Default::default()
-    };
-
-    let device = host
-        .device_or_default::<String>(None, AndroidStorageInput::Auto)
-        .await
-        .expect("connected device");
-    assert_eq!(device.storage, AndroidStorage::Sdcard);
-}
-
-#[tokio::test]
-#[ignore]
-async fn host_device_or_default_storage_as_internal() {
-    let host = Host {
-        ..Default::default()
-    };
-
-    let device = host
-        .device_or_default::<String>(None, AndroidStorageInput::Internal)
-        .await
-        .expect("connected device");
-    assert_eq!(device.storage, AndroidStorage::Internal);
-}
-
-#[tokio::test]
-#[ignore]
-async fn host_device_or_default_storage_as_sdcard() {
-    let host = Host {
-        ..Default::default()
-    };
-
-    let device = host
-        .device_or_default::<String>(None, AndroidStorageInput::Sdcard)
-        .await
-        .expect("connected device");
-    assert_eq!(device.storage, AndroidStorage::Sdcard);
 }
 
 #[tokio::test]

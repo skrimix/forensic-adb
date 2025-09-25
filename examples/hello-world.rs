@@ -1,5 +1,5 @@
 use bstr::ByteSlice;
-use forensic_adb::{AndroidStorageInput, DeviceError, Host};
+use forensic_adb::{DeviceError, Host};
 
 #[tokio::main]
 async fn main() -> Result<(), DeviceError> {
@@ -8,9 +8,7 @@ async fn main() -> Result<(), DeviceError> {
     let devices = host.devices::<Vec<_>>().await?;
     println!("Found devices: {devices:?}");
 
-    let device = host
-        .device_or_default(Option::<&String>::None, AndroidStorageInput::default())
-        .await?;
+    let device = host.device_or_default(Option::<&String>::None).await?;
     println!("Selected device: {device:?}");
 
     let output = device.execute_host_exec_out_command("id").await?;
