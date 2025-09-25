@@ -1045,26 +1045,37 @@ impl Device {
         let mut buf = [0; 64 * 1024];
         let mut transferred = 0u64;
         let mut last_progress = 0u64;
+        // Progress interval: ~100 steps, clamped [256KiB, 4MiB]
+        let interval: u64 = if let Some(total) = total_bytes {
+            let base = (total / 100).max(256 * 1024);
+            base.min(4 * 1024 * 1024)
+        } else {
+            1024 * 1024
+        };
 
         // Read "DATA" command one or more times for the file content
         loop {
             stream.read_exact(&mut buf[0..4]).await?;
 
             if &buf[0..4] == SyncCommand::Data.code() {
-                let len = read_length_little_endian(&mut stream).await?;
-                stream.read_exact(&mut buf[0..len]).await?;
-                buffer.write_all(&buf[0..len]).await?;
+                let mut len = read_length_little_endian(&mut stream).await?;
+                // Read exactly `len` bytes, chunked if larger than our buffer
+                while len > 0 {
+                    let take = len.min(buf.len());
+                    stream.read_exact(&mut buf[0..take]).await?;
+                    buffer.write_all(&buf[0..take]).await?;
+                    transferred += take as u64;
+                    len -= take;
 
-                transferred += len as u64;
-
-                // Send progress every 1M if progress reporting is enabled
-                if let Some(sender) = &progress_sender {
-                    if transferred - last_progress >= 1024 * 1024 {
-                        let _ = sender.send(FileTransferProgress {
-                            total_bytes: total_bytes.unwrap_or(0),
-                            transferred_bytes: transferred,
-                        });
-                        last_progress = transferred;
+                    // Throttled progress updates
+                    if let Some(sender) = &progress_sender {
+                        if transferred - last_progress >= interval {
+                            let _ = sender.send(FileTransferProgress {
+                                total_bytes: total_bytes.unwrap_or(0),
+                                transferred_bytes: transferred,
+                            });
+                            last_progress = transferred;
+                        }
                     }
                 }
             } else if &buf[0..4] == SyncCommand::Done.code() {
@@ -1107,10 +1118,12 @@ impl Device {
         let src = src.to_path_buf();
         let dest_dir = dest_dir.to_path_buf();
 
-        // Get totals first
+        // Gather entries once
+        let entries = self.list_dir(&src).await?;
+        // Compute totals
         let mut total_files = 0usize;
         let mut total_bytes = 0u64;
-        for entry in self.list_dir(&src).await? {
+        for entry in &entries {
             if entry.file_mode == UnixFileStatus::RegularFile {
                 total_files += 1;
                 total_bytes += entry.size as u64;
@@ -1136,7 +1149,7 @@ impl Device {
         let mut transferred_files = 0usize;
         let mut transferred_bytes = 0u64;
 
-        for entry in self.list_dir(&src).await? {
+        for entry in entries {
             match entry.file_mode {
                 UnixFileStatus::SymbolicLink => {} // Ignored
                 UnixFileStatus::Directory => {
@@ -1164,13 +1177,14 @@ impl Device {
 
                     // Send directory progress with current file
                     if let Some(sender) = &progress_sender {
+                        let current_file_path = d.display().to_string();
                         let _ = sender.send(DirectoryTransferProgress {
                             directory_name: None,
                             total_files,
                             transferred_files,
                             total_bytes,
                             transferred_bytes,
-                            current_file: Some(d.display().to_string()),
+                            current_file: Some(current_file_path.clone()),
                             current_file_progress: FileTransferProgress {
                                 total_bytes: file_size,
                                 transferred_bytes: 0,
@@ -1180,6 +1194,7 @@ impl Device {
                         // Spawn a task to handle file progress updates if progress reporting is enabled
                         if let Some(mut receiver) = file_receiver.take() {
                             let sender = sender.clone();
+                            let current_file_path_clone = current_file_path.clone();
                             tokio::spawn(async move {
                                 while let Some(file_progress) = receiver.recv().await {
                                     let _ = sender.send(DirectoryTransferProgress {
@@ -1189,7 +1204,7 @@ impl Device {
                                         total_bytes,
                                         transferred_bytes: transferred_bytes
                                             + file_progress.transferred_bytes,
-                                        current_file: None,
+                                        current_file: Some(current_file_path_clone.clone()),
                                         current_file_progress: file_progress,
                                     });
                                 }
@@ -1208,9 +1223,41 @@ impl Device {
 
                     transferred_files += 1;
                     transferred_bytes += file_size;
+
+                    // Emit post-file progress update
+                    if let Some(sender) = &progress_sender {
+                        let _ = sender.send(DirectoryTransferProgress {
+                            directory_name: None,
+                            total_files,
+                            transferred_files,
+                            total_bytes,
+                            transferred_bytes,
+                            current_file: None,
+                            current_file_progress: FileTransferProgress {
+                                total_bytes: file_size,
+                                transferred_bytes: file_size,
+                            },
+                        });
+                    }
                 }
                 _ => {}
             }
+        }
+
+        // Final summary
+        if let Some(sender) = &progress_sender {
+            let _ = sender.send(DirectoryTransferProgress {
+                directory_name: None,
+                total_files,
+                transferred_files,
+                total_bytes,
+                transferred_bytes,
+                current_file: None,
+                current_file_progress: FileTransferProgress {
+                    total_bytes: 0,
+                    transferred_bytes: 0,
+                },
+            });
         }
 
         Ok(())
@@ -1326,6 +1373,13 @@ impl Device {
         let mut buf = [0; 32 * 1024];
         let mut transferred = 0u64;
         let mut last_progress = 0u64;
+        // Progress interval: ~100 steps, clamped [256KiB, 4MiB]
+        let interval: u64 = if let Some(total) = total_bytes {
+            let base = (total / 100).max(256 * 1024);
+            base.min(4 * 1024 * 1024)
+        } else {
+            1024 * 1024
+        };
 
         loop {
             let len = buffer.read(&mut buf).await?;
@@ -1346,9 +1400,9 @@ impl Device {
 
             transferred += len as u64;
 
-            // Send progress every 4M if progress reporting is enabled
+            // Throttled progress updates
             if let Some(sender) = &progress_sender {
-                if transferred - last_progress >= 4 * 1024 * 1024 {
+                if transferred - last_progress >= interval {
                     let _ = sender.send(FileTransferProgress {
                         total_bytes: total_bytes.unwrap_or(0),
                         transferred_bytes: transferred,
@@ -1424,17 +1478,16 @@ impl Device {
     ) -> Result<()> {
         debug!("Pushing {} to {}", source.display(), dest_dir.display());
 
-        // Calculate totals first
-        let mut total_files = 0usize;
-        let mut total_bytes = 0u64;
-        let walker = WalkDir::new(source).follow_links(false).into_iter();
-        for entry in walker {
+        // Collect file entries once
+        let mut files: Vec<(std::path::PathBuf, u64)> = Vec::new();
+        for entry in WalkDir::new(source).follow_links(false) {
             let entry = entry?;
             if entry.metadata()?.is_file() {
-                total_files += 1;
-                total_bytes += entry.metadata()?.len();
+                files.push((entry.path().to_path_buf(), entry.metadata()?.len()));
             }
         }
+        let total_files = files.len();
+        let total_bytes: u64 = files.iter().map(|(_, sz)| *sz).sum();
 
         // Send initial progress if progress reporting is enabled
         if let Some(sender) = &progress_sender {
@@ -1455,17 +1508,8 @@ impl Device {
         let mut transferred_files = 0usize;
         let mut transferred_bytes = 0u64;
 
-        let walker = WalkDir::new(source).follow_links(false).into_iter();
-        for entry in walker {
-            let entry = entry?;
-            let path = entry.path();
-
-            if !entry.metadata()?.is_file() {
-                continue;
-            }
-
-            let file_size = entry.metadata()?.len();
-            let mut file = BufReader::new(File::open(path).await?);
+        for (path, file_size) in files {
+            let mut file = BufReader::new(File::open(&path).await?);
 
             let tail = path
                 .strip_prefix(source)
@@ -1485,13 +1529,14 @@ impl Device {
 
             // Send directory progress with current file
             if let Some(sender) = &progress_sender {
+                let current_file_path = dest.display().to_string();
                 let _ = sender.send(DirectoryTransferProgress {
                     directory_name: None,
                     total_files,
                     transferred_files,
                     total_bytes,
                     transferred_bytes,
-                    current_file: Some(dest.display().to_string()),
+                    current_file: Some(current_file_path.clone()),
                     current_file_progress: FileTransferProgress {
                         total_bytes: file_size,
                         transferred_bytes: 0,
@@ -1501,6 +1546,7 @@ impl Device {
                 // Spawn a task to handle file progress updates if progress reporting is enabled
                 if let Some(mut receiver) = file_receiver.take() {
                     let sender = sender.clone();
+                    let current_file_path_clone = current_file_path.clone();
                     tokio::spawn(async move {
                         while let Some(file_progress) = receiver.recv().await {
                             let _ = sender.send(DirectoryTransferProgress {
@@ -1510,7 +1556,7 @@ impl Device {
                                 total_bytes,
                                 transferred_bytes: transferred_bytes
                                     + file_progress.transferred_bytes,
-                                current_file: None,
+                                current_file: Some(current_file_path_clone.clone()),
                                 current_file_progress: file_progress,
                             });
                         }
@@ -1524,6 +1570,38 @@ impl Device {
 
             transferred_files += 1;
             transferred_bytes += file_size;
+
+            // Emit post-file progress update
+            if let Some(sender) = &progress_sender {
+                let _ = sender.send(DirectoryTransferProgress {
+                    directory_name: None,
+                    total_files,
+                    transferred_files,
+                    total_bytes,
+                    transferred_bytes,
+                    current_file: None,
+                    current_file_progress: FileTransferProgress {
+                        total_bytes: file_size,
+                        transferred_bytes: file_size,
+                    },
+                });
+            }
+        }
+
+        // Final summary
+        if let Some(sender) = &progress_sender {
+            let _ = sender.send(DirectoryTransferProgress {
+                directory_name: None,
+                total_files,
+                transferred_files,
+                total_bytes,
+                transferred_bytes,
+                current_file: None,
+                current_file_progress: FileTransferProgress {
+                    total_bytes: 0,
+                    transferred_bytes: 0,
+                },
+            });
         }
 
         Ok(())
@@ -1719,8 +1797,13 @@ impl Device {
             async move {
                 while let Some(push_progress) = push_receiver.recv().await {
                     // Map push progress to install progress (up to 90%)
-                    let _ = progress_sender
-                        .send((push_progress.transferred_bytes as f32 / file_size as f32) * 0.9);
+                    if file_size == 0 {
+                        let _ = progress_sender.send(0.9);
+                    } else {
+                        let frac = push_progress.transferred_bytes as f32 / file_size as f32;
+                        let prog = (frac * 0.9).clamp(0.0, 0.9);
+                        let _ = progress_sender.send(prog);
+                    }
                 }
             }
         });
@@ -1730,7 +1813,11 @@ impl Device {
         self.push_with_progress(&mut file, &tmp_apk_path, 0o644, file_size, push_sender)
             .await?;
 
-        let _ = progress_sender.send(0.9);
+        // If the file was empty, ensure we nudged to 0.9; otherwise the spawned task
+        // will already have emitted final ~0.9 on completion.
+        if file_size == 0 {
+            let _ = progress_sender.send(0.9);
+        }
 
         let mut command = "pm install".to_owned();
         if reinstall {
