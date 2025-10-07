@@ -480,7 +480,7 @@ impl Host {
         Ok(infos)
     }
 
-    pub fn track_devices(&self) -> impl Stream<Item = Result<DeviceBrief>> + '_ {
+    pub fn track_devices(&self) -> impl Stream<Item = Result<Vec<DeviceBrief>>> + '_ {
         async_stream::try_stream! {
             let mut stream = self.connect().await?;
             stream
@@ -502,12 +502,16 @@ impl Host {
                 if length > 0 {
                     let mut body = vec![0; length];
                     stream.read_exact(&mut body).await?;
-                    if let Some(device) = parse_device_brief(std::str::from_utf8(&body)?) {
-                        yield device;
-                    }
-                    else {
-                        Err(DeviceError::Adb("Failed to parse device state".to_owned()))?;
-                    }
+                    let text = std::str::from_utf8(&body)?;
+                    let devices: Vec<DeviceBrief> = text
+                        .lines()
+                        .filter(|line| !line.is_empty())
+                        .filter_map(parse_device_brief)
+                        .collect();
+                    yield devices;
+                }
+                else {
+                    yield vec![];
                 }
             }
         }
