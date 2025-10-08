@@ -480,6 +480,33 @@ impl Host {
         Ok(infos)
     }
 
+    /// Connects the ADB server to a remote device reachable over TCP/IP.
+    ///
+    /// Issues the host service `host:connect:<addr>` equivalent to
+    /// `adb connect <addr>` (e.g., "192.168.1.171:5555").
+    /// Returns the server's message (e.g., "connected to <addr>").
+    pub async fn connect_device<T: AsRef<str>>(&self, addr: T) -> Result<String> {
+        self.execute_host_command(&format!("connect:{}", addr.as_ref()), true, true)
+            .await
+    }
+
+    /// Disconnects the ADB server from a specific remote device over TCP/IP.
+    ///
+    /// Issues `host:disconnect:<addr>` equivalent to `adb disconnect <addr>`.
+    /// Returns the server's message (e.g., "disconnected <addr>").
+    pub async fn disconnect_device<T: AsRef<str>>(&self, addr: T) -> Result<String> {
+        self.execute_host_command(&format!("disconnect:{}", addr.as_ref()), true, true)
+            .await
+    }
+
+    /// Disconnects all TCP/IP devices from the ADB server.
+    ///
+    /// Equivalent to running `adb disconnect` with no arguments. Returns
+    /// the server's message.
+    pub async fn disconnect_all(&self) -> Result<String> {
+        self.execute_host_command("disconnect:", true, true).await
+    }
+
     pub fn track_devices(&self) -> impl Stream<Item = Result<Vec<DeviceBrief>>> + '_ {
         async_stream::try_stream! {
             let mut stream = self.connect().await?;
