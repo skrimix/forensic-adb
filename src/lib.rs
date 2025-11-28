@@ -1725,7 +1725,6 @@ impl Device {
             .to_str()
             .ok_or(DeviceError::Adb("Invalid apk path".to_owned()))?;
 
-        // push the apk to /data/local/tmp and run the "pm install" command
         let tmp_apk_path = UnixPathBuf::from("/data/local/tmp").join(base_name);
         let mut file = BufReader::new(File::open(apk_path).await?);
         self.push(&mut file, &tmp_apk_path, 0o644).await?;
@@ -1740,10 +1739,10 @@ impl Device {
         if bypass_low_target_sdk_block {
             command.push_str(" --bypass-low-target-sdk-block");
         }
-        command.push_str(&format!(" {}", tmp_apk_path.display()));
+        command.push_str(&format!(" \"{}\"", tmp_apk_path.display()));
         let output = self.execute_host_shell_command(&command).await?;
 
-        self.execute_host_shell_command(format!("rm {}", tmp_apk_path.display()).as_str())
+        self.execute_host_shell_command(format!("rm \"{}\"", tmp_apk_path.display()).as_str())
             .await?;
 
         if !output.starts_with("Success") {
@@ -1812,10 +1811,10 @@ impl Device {
         if bypass_low_target_sdk_block {
             command.push_str(" --bypass-low-target-sdk-block");
         }
-        command.push_str(&format!(" {}", tmp_apk_path.display()));
+        command.push_str(&format!(" \"{}\"", tmp_apk_path.display()));
         let output = self.execute_host_shell_command(&command).await?;
 
-        self.execute_host_shell_command(format!("rm {}", tmp_apk_path.display()).as_str())
+        self.execute_host_shell_command(format!("rm \"{}\"", tmp_apk_path.display()).as_str())
             .await?;
 
         if !output.starts_with("Success") {
