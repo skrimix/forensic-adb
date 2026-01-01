@@ -136,7 +136,7 @@ fn parse_device_brief(line: &str) -> Option<DeviceBrief> {
 
 /// Reads the payload length of a host message from the stream.
 async fn read_length<R: AsyncRead + Unpin>(stream: &mut R) -> Result<usize> {
-    let mut bytes: [u8; 4] = [0; 4];
+    let mut bytes = [0; 4];
     stream.read_exact(&mut bytes).await?;
 
     let response = std::str::from_utf8(&bytes)?;
@@ -146,7 +146,7 @@ async fn read_length<R: AsyncRead + Unpin>(stream: &mut R) -> Result<usize> {
 
 /// Reads the payload length of a device message from the stream.
 async fn read_length_little_endian<R: AsyncRead + Unpin>(reader: &mut R) -> Result<usize> {
-    let mut bytes: [u8; 4] = [0; 4];
+    let mut bytes = [0; 4];
     reader.read_exact(&mut bytes).await?;
 
     let n: usize = (bytes[0] as usize)
@@ -176,7 +176,7 @@ async fn read_response(
     has_output: bool,
     has_length: bool,
 ) -> Result<Vec<u8>> {
-    let mut bytes: [u8; 1024] = [0; 1024];
+    let mut bytes = vec![0; 1024];
 
     stream.read_exact(&mut bytes[0..4]).await?;
 
@@ -514,7 +514,7 @@ impl Host {
                 .write_all(encode_message("host:track-devices")?.as_bytes())
                 .await?;
 
-            let mut bytes: [u8; 1024] = [0; 1024];
+            let mut bytes = vec![0; 1024];
             stream.read_exact(&mut bytes[0..4]).await?;
             if !bytes.starts_with(SyncCommand::Okay.code()) {
                 let n = bytes.len().min(read_length(&mut stream).await?);
