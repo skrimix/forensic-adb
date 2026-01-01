@@ -884,7 +884,7 @@ impl Device {
         stream.write_all(args).await?;
 
         // Use the maximum 64K buffer to transfer the file contents.
-        let mut buf = [0; 64 * 1024];
+        let mut buf = vec![0; 64 * 1024];
 
         let mut listings = Vec::new();
 
@@ -1024,7 +1024,7 @@ impl Device {
         stream.write_all(args).await?;
 
         // Use the maximum 64K buffer to transfer the file contents.
-        let mut buf = [0; 64 * 1024];
+        let mut buf = vec![0; 64 * 1024];
         let mut transferred = 0u64;
         let mut last_progress = 0u64;
         // Progress interval: ~100 steps, clamped [256KiB, 4MiB]
@@ -1352,7 +1352,7 @@ impl Device {
 
         // Use a 32K buffer to transfer the file contents
         // TODO: Maybe adjust to maxdata (256K)
-        let mut buf = [0; 32 * 1024];
+        let mut buf = vec![0; 32 * 1024];
         let mut transferred = 0u64;
         let mut last_progress = 0u64;
         // Progress interval: ~100 steps, clamped [256KiB, 4MiB]
