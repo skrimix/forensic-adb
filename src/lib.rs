@@ -1679,11 +1679,12 @@ impl Device {
         let size = u32::from_le_bytes(stat_data[4..8].try_into().unwrap());
         let time = u32::from_le_bytes(stat_data[8..12].try_into().unwrap());
 
-        // Mode 0 indicates file not found
+        // Mode 0 indicates the remote path does not exist.
         if mode == 0 {
-            return Err(DeviceError::Adb(
-                "adb: stat failed: No such file or directory".to_owned(),
-            ));
+            return Err(DeviceError::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("remote path not found: {}", path.display()),
+            )));
         }
 
         // Convert mode to UnixFileStatus

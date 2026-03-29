@@ -1010,10 +1010,10 @@ async fn device_stat_nonexistent() {
                 let result = device.stat(&nonexistent_path).await;
                 assert!(result.is_err());
                 match result {
-                    Err(DeviceError::Adb(msg)) => {
-                        assert!(msg.contains("No such file or directory"));
+                    Err(DeviceError::Io(err)) => {
+                        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
                     }
-                    _ => panic!("Expected Adb error for nonexistent file"),
+                    _ => panic!("Expected not found error for nonexistent file"),
                 }
             })
         },
