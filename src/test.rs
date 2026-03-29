@@ -20,6 +20,7 @@ use std::panic;
 use std::path::PathBuf;
 use std::time::SystemTime;
 use tempfile::{tempdir, TempDir};
+use uuid::Uuid;
 
 #[tokio::test]
 async fn read_length_from_valid_string() {
@@ -97,12 +98,14 @@ where
     let mut test_root = UnixPathBuf::from(response.trim_end_matches('\n'));
 
     test_root.push("mozdevice");
+    test_root.push(Uuid::new_v4().to_string());
 
     let _ = device.remove(&test_root).await;
 
     // TODO: we've removed panic::catch_unwind here, if the test crashes the forwarding isn't cleaned up
     let _result = test(&device, &tmp_dir, &test_root).await;
 
+    let _ = device.remove(&test_root).await;
     let _ = device.kill_forward_all_ports().await;
     // let _ = device.kill_reverse_all_ports();
 
