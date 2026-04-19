@@ -1737,7 +1737,7 @@ impl Device {
         if grant_runtime_permissions {
             command.push_str(" -g");
         }
-        if bypass_low_target_sdk_block {
+        if bypass_low_target_sdk_block && self.get_android_version().await? >= 14 {
             command.push_str(" --bypass-low-target-sdk-block");
         }
         command.push_str(&format!(" \"{}\"", tmp_apk_path.display()));
@@ -1809,7 +1809,7 @@ impl Device {
         if grant_runtime_permissions {
             command.push_str(" -g");
         }
-        if bypass_low_target_sdk_block {
+        if bypass_low_target_sdk_block && self.get_android_version().await? >= 14 {
             command.push_str(" --bypass-low-target-sdk-block");
         }
         command.push_str(&format!(" \"{}\"", tmp_apk_path.display()));
