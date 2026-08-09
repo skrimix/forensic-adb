@@ -780,7 +780,7 @@ impl Device {
         for arg in am_start_args {
             am_start.push(' ');
             if SYNC_REGEX.is_match(arg.as_ref()) {
-                am_start.push_str(&format!("\"{}\"", &shell::escape(arg.as_ref())));
+                am_start.push_str(&format!("\"{}\"", shell::escape(arg.as_ref())));
             } else {
                 am_start.push_str(&shell::escape(arg.as_ref()));
             };
@@ -951,7 +951,7 @@ impl Device {
                 }
 
                 if !prefix.is_empty() {
-                    name = format!("{}/{}", prefix, &name);
+                    name = format!("{}/{}", prefix, name);
                 }
 
                 let file_type = (mode >> 13) & 0b111;
