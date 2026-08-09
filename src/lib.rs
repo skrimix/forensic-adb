@@ -92,6 +92,23 @@ fn encode_message(payload: &str) -> Result<String> {
     Ok(format!("{hex_length}{payload}"))
 }
 
+fn parse_forward_port(response: &str) -> Result<u16> {
+    let bytes = response.as_bytes();
+
+    if let (Some(length), Some(port)) = (bytes.get(..4), bytes.get(4..)) {
+        if let Some(length) = std::str::from_utf8(length)
+            .ok()
+            .and_then(|length| usize::from_str_radix(length, 16).ok())
+        {
+            if length == port.len() {
+                return Ok(std::str::from_utf8(port)?.parse()?);
+            }
+        }
+    }
+
+    Ok(response.parse()?)
+}
+
 fn parse_device_info(line: &str) -> Option<DeviceInfo> {
     // Turn "serial\tdevice key1:value1 key2:value2 ..." into a `DeviceInfo`.
     let mut pairs = line.split_whitespace();
@@ -789,9 +806,27 @@ impl Device {
         let response = self.host.execute_command(&command, true, false).await?;
 
         if local == 0 {
-            Ok(response.parse::<u16>()?)
+            parse_forward_port(&response)
         } else {
             Ok(local)
+        }
+    }
+
+    /// Forwards a local TCP port to an abstract Unix domain socket on the device.
+    ///
+    /// Pass `socket_name` without the `localabstract:` prefix. A `local_port` of `0` asks ADB to
+    /// choose an available port.
+    pub async fn forward_localabstract(&self, local_port: u16, socket_name: &str) -> Result<u16> {
+        let command = format!(
+            "host-serial:{}:forward:tcp:{};localabstract:{}",
+            self.serial, local_port, socket_name
+        );
+        let response = self.host.execute_command(&command, true, false).await?;
+
+        if local_port == 0 {
+            parse_forward_port(&response)
+        } else {
+            Ok(local_port)
         }
     }
 

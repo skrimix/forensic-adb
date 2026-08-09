@@ -20,6 +20,8 @@ use std::panic;
 use std::path::PathBuf;
 use std::time::SystemTime;
 use tempfile::{tempdir, TempDir};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpListener;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -266,16 +268,61 @@ async fn device_forward_port_hardcoded() {
     .await;
 }
 
-// #[test]
-// #[ignore]
-// TODO: "adb server response to `forward tcp:0 ...` was not a u16: \"000559464\"")
-// fn device_forward_port_system_allocated() {
-//     run_device_test(|device: &Device, _: &TempDir, _: &UnixPath| {
-//         let local_port = device.forward_port(0, 3037).expect("local_port");
-//         assert_ne!(local_port, 0);
-//         // TODO: check with forward --list
-//     });
-// }
+#[tokio::test]
+async fn device_forward_localabstract() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let requests: &[(&[u8], &[u8])] = &[
+            (
+                b"host-serial:test-device:forward:tcp:3035;localabstract:forensic.socket",
+                b"OKAYOKAY",
+            ),
+            (
+                b"host-serial:test-device:forward:tcp:0;localabstract:forensic.socket",
+                b"OKAYOKAY000549464",
+            ),
+        ];
+
+        for (expected_command, response) in requests {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut length = [0; 4];
+            stream.read_exact(&mut length).await.unwrap();
+            let length = usize::from_str_radix(std::str::from_utf8(&length).unwrap(), 16).unwrap();
+            let mut command = vec![0; length];
+            stream.read_exact(&mut command).await.unwrap();
+
+            assert_eq!(&command, expected_command);
+            stream.write_all(response).await.unwrap();
+        }
+    });
+    let device = Device::new(
+        Host {
+            host: Some("127.0.0.1".to_owned()),
+            port: Some(port),
+        },
+        "test-device".to_owned(),
+        BTreeMap::new(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        device
+            .forward_localabstract(3035, "forensic.socket")
+            .await
+            .unwrap(),
+        3035
+    );
+    assert_eq!(
+        device
+            .forward_localabstract(0, "forensic.socket")
+            .await
+            .unwrap(),
+        49464
+    );
+    server.await.unwrap();
+}
 
 #[tokio::test]
 #[ignore]
