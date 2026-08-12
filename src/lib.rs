@@ -18,7 +18,9 @@ use std::io;
 use std::iter::FromIterator;
 use std::num::{ParseIntError, TryFromIntError};
 use std::path::{Component, Path};
+use std::pin::Pin;
 use std::str::Utf8Error;
+use std::task::{Context, Poll};
 use std::time::{Duration as StdDuration, SystemTime};
 use thiserror::Error;
 use tokio::fs::File;
@@ -84,6 +86,28 @@ pub enum DeviceError {
     PackageManagerError(String),
     #[error("Timed out while opening ADB connection")]
     ConnectTimeout,
+}
+
+/// Streaming output from a shell command.
+///
+/// The stream contains stdout and stderr as raw bytes. Wrap it in a
+/// [`BufReader`] to read text output one line at a time.
+///
+/// Dropping the stream closes the ADB connection. A remote process that detaches from the shell
+/// may continue running.
+#[derive(Debug)]
+pub struct ShellStream {
+    stream: TcpStream,
+}
+
+impl AsyncRead for ShellStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
 }
 
 fn encode_message(payload: &str) -> Result<String> {
@@ -649,16 +673,7 @@ impl Device {
         has_output: bool,
         has_length: bool,
     ) -> Result<Vec<u8>> {
-        let mut stream = self.host.connect().await?;
-
-        let switch_command = format!("host:transport:{}", self.serial);
-        trace!("execute_host_command: >> {:?}", &switch_command);
-        stream
-            .write_all(encode_message(&switch_command)?.as_bytes())
-            .await?;
-        let _bytes = read_response(&mut stream, false, false).await?;
-        trace!("execute_host_command: << {:?}", _bytes);
-        // TODO: should we assert no bytes were read?
+        let mut stream = self.open_transport().await?;
 
         trace!("execute_host_command: >> {:?}", &command);
         stream
@@ -668,6 +683,20 @@ impl Device {
         trace!("execute_host_command: << {:?}", bstr::BStr::new(&bytes));
 
         Ok(bytes)
+    }
+
+    async fn open_transport(&self) -> Result<TcpStream> {
+        let mut stream = self.host.connect().await?;
+
+        let switch_command = format!("host:transport:{}", self.serial);
+        trace!("open_transport: >> {:?}", &switch_command);
+        stream
+            .write_all(encode_message(&switch_command)?.as_bytes())
+            .await?;
+        let response = read_response(&mut stream, false, false).await?;
+        trace!("open_transport: << {:?}", response);
+
+        Ok(stream)
     }
 
     pub async fn execute_host_command_to_string(
@@ -702,6 +731,18 @@ impl Device {
             .await
     }
 
+    /// Starts a shell command and returns its output without waiting for it to finish.
+    ///
+    /// Use this for long-running commands such as `logcat`. The stream contains merged stdout and
+    /// stderr and does not report the command's exit status.
+    pub async fn execute_host_shell_command_stream(
+        &self,
+        shell_command: &str,
+    ) -> Result<ShellStream> {
+        self.execute_host_shell_command_stream_as(shell_command, false)
+            .await
+    }
+
     pub async fn execute_host_exec_out_command(&self, shell_command: &str) -> Result<Vec<u8>> {
         self.execute_host_command(&format!("exec:{shell_command}"), true, false)
             .await
@@ -712,11 +753,36 @@ impl Device {
         shell_command: &str,
         enable_run_as: bool,
     ) -> Result<String> {
+        let command = self.shell_service_command(shell_command, enable_run_as)?;
+        self.execute_host_command_to_string(&command, true, false)
+            .await
+    }
+
+    /// Starts a shell command with optional `run-as` handling and returns its output immediately.
+    ///
+    /// If `enable_run_as` is true, [`Device::run_as_package`] must contain the package name.
+    pub async fn execute_host_shell_command_stream_as(
+        &self,
+        shell_command: &str,
+        enable_run_as: bool,
+    ) -> Result<ShellStream> {
+        let command = self.shell_service_command(shell_command, enable_run_as)?;
+        let mut stream = self.open_transport().await?;
+
+        trace!("execute_host_shell_command_stream_as: >> {:?}", command);
+        stream
+            .write_all(encode_message(&command)?.as_bytes())
+            .await?;
+        let response = read_response(&mut stream, false, false).await?;
+        trace!("execute_host_shell_command_stream_as: << {:?}", response);
+
+        Ok(ShellStream { stream })
+    }
+
+    fn shell_service_command(&self, shell_command: &str, enable_run_as: bool) -> Result<String> {
         // We don't want to duplicate su invocations.
         if shell_command.starts_with("su") {
-            return self
-                .execute_host_command_to_string(&format!("shell:{shell_command}"), true, false)
-                .await;
+            return Ok(format!("shell:{shell_command}"));
         }
 
         let has_outer_quotes = shell_command.starts_with('"') && shell_command.ends_with('"')
@@ -730,37 +796,18 @@ impl Device {
                 .ok_or(DeviceError::MissingPackage)?;
 
             if has_outer_quotes {
-                return self
-                    .execute_host_command_to_string(
-                        &format!("shell:run-as {run_as_package} {shell_command}"),
-                        true,
-                        false,
-                    )
-                    .await;
+                return Ok(format!("shell:run-as {run_as_package} {shell_command}"));
             }
 
             if SYNC_REGEX.is_match(shell_command) {
                 let arg: &str = &shell_command.replace('\'', "'\"'\"'")[..];
-                return self
-                    .execute_host_command_to_string(
-                        &format!("shell:run-as {run_as_package} {arg}"),
-                        true,
-                        false,
-                    )
-                    .await;
+                return Ok(format!("shell:run-as {run_as_package} {arg}"));
             }
 
-            return self
-                .execute_host_command_to_string(
-                    &format!("shell:run-as {run_as_package} \"{shell_command}\""),
-                    true,
-                    false,
-                )
-                .await;
+            return Ok(format!("shell:run-as {run_as_package} \"{shell_command}\""));
         }
 
-        self.execute_host_command_to_string(&format!("shell:{shell_command}"), true, false)
-            .await
+        Ok(format!("shell:{shell_command}"))
     }
 
     pub async fn is_app_installed(&self, package: &str) -> Result<bool> {

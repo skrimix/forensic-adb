@@ -21,8 +21,31 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 use tempfile::{tempdir, TempDir};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::time::{timeout, Duration};
 use uuid::Uuid;
+
+async fn read_adb_request(stream: &mut TcpStream) -> String {
+    let mut length = [0; 4];
+    stream.read_exact(&mut length).await.unwrap();
+    let length = usize::from_str_radix(std::str::from_utf8(&length).unwrap(), 16).unwrap();
+    let mut command = vec![0; length];
+    stream.read_exact(&mut command).await.unwrap();
+    String::from_utf8(command).unwrap()
+}
+
+async fn mock_device(port: u16) -> Device {
+    Device::new(
+        Host {
+            host: Some("127.0.0.1".to_owned()),
+            port: Some(port),
+        },
+        "test-device".to_owned(),
+        BTreeMap::new(),
+    )
+    .await
+    .unwrap()
+}
 
 #[tokio::test]
 async fn read_length_from_valid_string() {
@@ -247,6 +270,142 @@ async fn device_shell_command() {
         })
     })
     .await;
+}
+
+#[tokio::test]
+async fn device_shell_command_stream_reads_before_eof() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+
+        assert_eq!(
+            read_adb_request(&mut stream).await,
+            "host:transport:test-device"
+        );
+        stream.write_all(b"OKAY").await.unwrap();
+        assert_eq!(read_adb_request(&mut stream).await, "shell:logcat");
+        stream.write_all(b"OKAYfirst\n").await.unwrap();
+
+        release_receiver.await.unwrap();
+        stream.write_all(b"second\n").await.unwrap();
+        stream.shutdown().await.unwrap();
+    });
+    let device = mock_device(port).await;
+
+    let mut output = timeout(
+        Duration::from_secs(1),
+        device.execute_host_shell_command_stream("logcat"),
+    )
+    .await
+    .expect("streaming command to start before EOF")
+    .unwrap();
+    let mut first = [0; 6];
+    timeout(Duration::from_secs(1), output.read_exact(&mut first))
+        .await
+        .expect("first output before EOF")
+        .unwrap();
+    assert_eq!(&first, b"first\n");
+
+    release_sender.send(()).unwrap();
+    let mut remaining = Vec::new();
+    output.read_to_end(&mut remaining).await.unwrap();
+    assert_eq!(remaining, b"second\n");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn device_shell_command_stream_reports_handshake_failure() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+
+        assert_eq!(
+            read_adb_request(&mut stream).await,
+            "host:transport:test-device"
+        );
+        stream.write_all(b"OKAY").await.unwrap();
+        assert_eq!(read_adb_request(&mut stream).await, "shell:logcat");
+        stream.write_all(b"FAIL0007failure").await.unwrap();
+    });
+    let device = mock_device(port).await;
+
+    match device.execute_host_shell_command_stream("logcat").await {
+        Err(DeviceError::Adb(message)) => assert_eq!(message, "adb error: failure"),
+        result => panic!("expected ADB error, got {result:?}"),
+    }
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn dropping_shell_command_stream_closes_connection() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+
+        assert_eq!(
+            read_adb_request(&mut stream).await,
+            "host:transport:test-device"
+        );
+        stream.write_all(b"OKAY").await.unwrap();
+        assert_eq!(read_adb_request(&mut stream).await, "shell:logcat");
+        stream.write_all(b"OKAY").await.unwrap();
+
+        let mut byte = [0];
+        timeout(Duration::from_secs(1), stream.read(&mut byte))
+            .await
+            .expect("client to close connection")
+            .unwrap()
+    });
+    let device = mock_device(port).await;
+
+    let output = device
+        .execute_host_shell_command_stream("logcat")
+        .await
+        .unwrap();
+    drop(output);
+
+    assert_eq!(server.await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn device_shell_command_stream_supports_run_as() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+
+        assert_eq!(
+            read_adb_request(&mut stream).await,
+            "host:transport:test-device"
+        );
+        stream.write_all(b"OKAY").await.unwrap();
+        assert_eq!(
+            read_adb_request(&mut stream).await,
+            "shell:run-as com.example \"id\""
+        );
+        stream.write_all(b"OKAY").await.unwrap();
+    });
+    let mut device = mock_device(port).await;
+    device.run_as_package = Some("com.example".to_owned());
+
+    let output = device
+        .execute_host_shell_command_stream_as("id", true)
+        .await
+        .unwrap();
+    drop(output);
+    server.await.unwrap();
+
+    device.run_as_package = None;
+    assert!(matches!(
+        device
+            .execute_host_shell_command_stream_as("id", true)
+            .await,
+        Err(DeviceError::MissingPackage)
+    ));
 }
 
 #[tokio::test]

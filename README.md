@@ -9,7 +9,7 @@ This code has been extracted from [mozilla-central/testing/mozbase/rust/mozdevic
 [1]: https://hg.mozilla.org/mozilla-central/file/tip/testing/mozbase/rust/mozdevice
 
 ```rust
-use forensic_adb::{AndroidStorageInput, DeviceError, Host};
+use forensic_adb::{DeviceError, Host};
 
 #[tokio::main]
 async fn main() -> Result<(), DeviceError> {
@@ -19,12 +19,32 @@ async fn main() -> Result<(), DeviceError> {
     println!("Found devices: {:?}", devices);
 
     let device = host
-        .device_or_default(Option::<&String>::None, AndroidStorageInput::default())
+        .device_or_default::<String>(None)
         .await?;
     println!("Selected device: {:?}", device);
 
     let output = device.execute_host_shell_command("id").await?;
     println!("Received response: {:?}", output);
+
+    Ok(())
+}
+```
+
+Long-running commands can be read as they produce output:
+
+```rust
+use forensic_adb::{DeviceError, Host};
+use tokio::io::{AsyncBufReadExt, BufReader};
+
+#[tokio::main]
+async fn main() -> Result<(), DeviceError> {
+    let device = Host::default().device_or_default::<String>(None).await?;
+    let output = device.execute_host_shell_command_stream("logcat").await?;
+    let mut lines = BufReader::new(output).lines();
+
+    while let Some(line) = lines.next_line().await? {
+        println!("{line}");
+    }
 
     Ok(())
 }
