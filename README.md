@@ -50,6 +50,48 @@ async fn main() -> Result<(), DeviceError> {
 }
 ```
 
+Shell v2 keeps stdout and stderr separate and reports the remote exit code:
+
+```rust
+use forensic_adb::{DeviceError, Host};
+
+#[tokio::main]
+async fn main() -> Result<(), DeviceError> {
+    let device = Host::default().device_or_default::<String>(None).await?;
+    let output = device
+        .execute_host_shell_v2_command("printf output; printf error >&2; exit 7")
+        .await?;
+
+    println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
+    println!("stderr: {}", String::from_utf8_lossy(&output.stderr));
+    println!("exit code: {}", output.exit_code);
+    Ok(())
+}
+```
+
+Long-running shell v2 commands yield packets as they arrive:
+
+```rust
+use forensic_adb::{DeviceError, Host, ShellV2Packet};
+use futures::StreamExt;
+
+#[tokio::main]
+async fn main() -> Result<(), DeviceError> {
+    let device = Host::default().device_or_default::<String>(None).await?;
+    let mut output = device.execute_host_shell_v2_command_stream("logcat").await?;
+
+    while let Some(packet) = output.next().await {
+        match packet? {
+            ShellV2Packet::Stdout(bytes) => print!("{}", String::from_utf8_lossy(&bytes)),
+            ShellV2Packet::Stderr(bytes) => eprint!("{}", String::from_utf8_lossy(&bytes)),
+            ShellV2Packet::Exit(code) => println!("exit code: {code}"),
+        }
+    }
+
+    Ok(())
+}
+```
+
 ## License
 
 Mozilla Public License (MPL-2.0)

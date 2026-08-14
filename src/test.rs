@@ -13,7 +13,7 @@
 
 use crate::*;
 
-use futures::future::BoxFuture;
+use futures::{future::BoxFuture, StreamExt};
 use serial_test::serial;
 use std::collections::BTreeSet;
 use std::panic;
@@ -45,6 +45,54 @@ async fn mock_device(port: u16) -> Device {
     )
     .await
     .unwrap()
+}
+
+fn shell_v2_frame(id: u8, payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(5 + payload.len());
+    frame.push(id);
+    frame.extend(u32::try_from(payload.len()).unwrap().to_le_bytes());
+    frame.extend(payload);
+    frame
+}
+
+async fn accept_shell_v2_command(listener: &TcpListener, expected_command: &str) -> TcpStream {
+    let (mut features, _) = listener.accept().await.unwrap();
+    assert_eq!(
+        read_adb_request(&mut features).await,
+        "host-serial:test-device:features"
+    );
+    features.write_all(b"OKAY0008shell_v2").await.unwrap();
+    features.shutdown().await.unwrap();
+    drop(features);
+
+    let (mut stream, _) = listener.accept().await.unwrap();
+    assert_eq!(
+        read_adb_request(&mut stream).await,
+        "host:transport:test-device"
+    );
+    stream.write_all(b"OKAY").await.unwrap();
+    assert_eq!(read_adb_request(&mut stream).await, expected_command);
+    stream.write_all(b"OKAY").await.unwrap();
+    let mut close_stdin = [0; 5];
+    stream.read_exact(&mut close_stdin).await.unwrap();
+    assert_eq!(close_stdin, [4, 0, 0, 0, 0]);
+    stream
+}
+
+async fn mock_shell_v2_stream(response: Vec<u8>) -> (ShellV2Stream, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let mut stream = accept_shell_v2_command(&listener, "shell,v2,raw:test").await;
+        stream.write_all(&response).await.unwrap();
+        stream.shutdown().await.unwrap();
+    });
+    let device = mock_device(port).await;
+    let stream = device
+        .execute_host_shell_v2_command_stream("test")
+        .await
+        .unwrap();
+    (stream, server)
 }
 
 #[tokio::test]
@@ -270,6 +318,226 @@ async fn device_shell_command() {
         })
     })
     .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn device_shell_v2_command() {
+    run_device_test(|device: &Device, _: &TempDir, _: &UnixPath| {
+        Box::pin(async {
+            let output = device
+                .execute_host_shell_v2_command("cat; printf out; printf err >&2; exit 7")
+                .await
+                .expect("to have shell v2 output");
+            assert_eq!(output.stdout, b"out");
+            assert_eq!(output.stderr, b"err");
+            assert_eq!(output.exit_code, 7);
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn device_shell_v2_command_collects_output_and_exit_code() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let mut stream = accept_shell_v2_command(&listener, "shell,v2,raw:test").await;
+        let mut response = shell_v2_frame(1, b"out\0");
+        response.extend(shell_v2_frame(2, b"err\xff"));
+        response.extend(shell_v2_frame(1, b"put"));
+        response.extend(shell_v2_frame(2, b""));
+        response.extend(shell_v2_frame(3, &[7]));
+
+        for chunk in response.chunks(2) {
+            stream.write_all(chunk).await.unwrap();
+        }
+    });
+    let device = mock_device(port).await;
+
+    let output = device.execute_host_shell_v2_command("test").await.unwrap();
+    assert_eq!(output.stdout, b"out\0put");
+    assert_eq!(output.stderr, b"err\xff");
+    assert_eq!(output.exit_code, 7);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn device_shell_v2_command_stream_reads_before_exit() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut stream = accept_shell_v2_command(&listener, "shell,v2,raw:logcat").await;
+        stream
+            .write_all(&shell_v2_frame(1, b"first\n"))
+            .await
+            .unwrap();
+
+        release_receiver.await.unwrap();
+        stream
+            .write_all(&shell_v2_frame(2, b"warning\n"))
+            .await
+            .unwrap();
+        stream.write_all(&shell_v2_frame(3, &[0])).await.unwrap();
+    });
+    let device = mock_device(port).await;
+    let mut output = device
+        .execute_host_shell_v2_command_stream("logcat")
+        .await
+        .unwrap();
+
+    let first = timeout(Duration::from_secs(1), output.next())
+        .await
+        .expect("stdout before exit")
+        .unwrap()
+        .unwrap();
+    assert_eq!(first, ShellV2Packet::Stdout(b"first\n".to_vec()));
+
+    release_sender.send(()).unwrap();
+    assert_eq!(
+        output.next().await.unwrap().unwrap(),
+        ShellV2Packet::Stderr(b"warning\n".to_vec())
+    );
+    assert_eq!(
+        output.next().await.unwrap().unwrap(),
+        ShellV2Packet::Exit(0)
+    );
+    assert!(output.next().await.is_none());
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn device_shell_v2_command_requires_feature() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(
+            read_adb_request(&mut stream).await,
+            "host-serial:test-device:features"
+        );
+        stream.write_all(b"OKAY0003cmd").await.unwrap();
+        stream.shutdown().await.unwrap();
+
+        timeout(Duration::from_millis(100), listener.accept())
+            .await
+            .expect_err("no shell service request without shell_v2");
+    });
+    let device = mock_device(port).await;
+
+    match device.execute_host_shell_v2_command_stream("test").await {
+        Err(DeviceError::UnsupportedFeature(feature)) => assert_eq!(feature, "shell_v2"),
+        result => panic!("expected unsupported feature error, got {result:?}"),
+    }
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn device_shell_v2_command_reports_handshake_failure() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (mut features, _) = listener.accept().await.unwrap();
+        assert_eq!(
+            read_adb_request(&mut features).await,
+            "host-serial:test-device:features"
+        );
+        features.write_all(b"OKAY0008shell_v2").await.unwrap();
+        features.shutdown().await.unwrap();
+        drop(features);
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(
+            read_adb_request(&mut stream).await,
+            "host:transport:test-device"
+        );
+        stream.write_all(b"OKAY").await.unwrap();
+        assert_eq!(read_adb_request(&mut stream).await, "shell,v2,raw:test");
+        stream.write_all(b"FAIL0007failure").await.unwrap();
+    });
+    let device = mock_device(port).await;
+
+    match device.execute_host_shell_v2_command_stream("test").await {
+        Err(DeviceError::Adb(message)) => assert_eq!(message, "adb error: failure"),
+        result => panic!("expected ADB error, got {result:?}"),
+    }
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn device_shell_v2_command_supports_run_as() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let mut stream =
+            accept_shell_v2_command(&listener, "shell,v2,raw:run-as com.example \"id\"").await;
+        stream.write_all(&shell_v2_frame(3, &[0])).await.unwrap();
+    });
+    let mut device = mock_device(port).await;
+    device.run_as_package = Some("com.example".to_owned());
+
+    let output = device
+        .execute_host_shell_v2_command_as("id", true)
+        .await
+        .unwrap();
+    assert_eq!(output.exit_code, 0);
+    server.await.unwrap();
+
+    device.run_as_package = None;
+    assert!(matches!(
+        device.execute_host_shell_v2_command_as("id", true).await,
+        Err(DeviceError::MissingPackage)
+    ));
+}
+
+#[tokio::test]
+async fn shell_v2_stream_rejects_invalid_packets() {
+    let responses = [
+        (shell_v2_frame(9, b""), "unknown packet ID 9"),
+        (
+            shell_v2_frame(3, b""),
+            "exit packet has 0 bytes instead of 1",
+        ),
+        (
+            {
+                let mut header = vec![1];
+                header.extend(u32::try_from(ADB_MAX_PAYLOAD + 1).unwrap().to_le_bytes());
+                header
+            },
+            "packet payload is too large",
+        ),
+        (vec![1, 3, 0, 0, 0, b'x'], "packet payload"),
+        (vec![1, 0], "packet header"),
+    ];
+
+    for (response, expected) in responses {
+        let (mut stream, server) = mock_shell_v2_stream(response).await;
+        match stream.next().await {
+            Some(Err(DeviceError::ShellProtocol(message))) => {
+                assert!(
+                    message.contains(expected),
+                    "{message:?} did not contain {expected:?}"
+                );
+            }
+            result => panic!("expected shell protocol error, got {result:?}"),
+        }
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn shell_v2_stream_requires_exit_packet() {
+    let (mut stream, server) = mock_shell_v2_stream(shell_v2_frame(1, b"output")).await;
+    assert_eq!(
+        stream.next().await.unwrap().unwrap(),
+        ShellV2Packet::Stdout(b"output".to_vec())
+    );
+    assert!(matches!(
+        stream.next().await,
+        Some(Err(DeviceError::ShellProtocol(_)))
+    ));
+    server.await.unwrap();
 }
 
 #[tokio::test]
@@ -1252,6 +1520,17 @@ fn format_own_device_error_types() {
     assert_eq!(
         format!("{}", DeviceError::Adb("foo".to_string())),
         "foo".to_string()
+    );
+    assert_eq!(
+        format!(
+            "{}",
+            DeviceError::UnsupportedFeature("shell_v2".to_string())
+        ),
+        "Device does not support ADB feature 'shell_v2'".to_string()
+    );
+    assert_eq!(
+        format!("{}", DeviceError::ShellProtocol("bad packet".to_string())),
+        "Invalid ADB shell v2 response: bad packet".to_string()
     );
 }
 

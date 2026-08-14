@@ -14,6 +14,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::BTreeMap;
 use std::convert::TryFrom;
+use std::future::poll_fn;
 use std::io;
 use std::iter::FromIterator;
 use std::num::{ParseIntError, TryFromIntError};
@@ -36,6 +37,7 @@ use walkdir::WalkDir;
 use crate::adb::{DeviceSerial, SyncCommand};
 
 const ADB_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const ADB_MAX_PAYLOAD: usize = 1024 * 1024;
 
 pub type Result<T> = std::result::Result<T, DeviceError>;
 
@@ -86,6 +88,10 @@ pub enum DeviceError {
     PackageManagerError(String),
     #[error("Timed out while opening ADB connection")]
     ConnectTimeout,
+    #[error("Device does not support ADB feature '{0}'")]
+    UnsupportedFeature(String),
+    #[error("Invalid ADB shell v2 response: {0}")]
+    ShellProtocol(String),
 }
 
 /// Streaming output from a shell command.
@@ -107,6 +113,117 @@ impl AsyncRead for ShellStream {
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+
+/// Output collected from an ADB shell v2 command.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ShellOutput {
+    /// Data written to stdout.
+    pub stdout: Vec<u8>,
+    /// Data written to stderr.
+    pub stderr: Vec<u8>,
+    /// Exit code reported by the remote command.
+    pub exit_code: u8,
+}
+
+/// A packet received from an ADB shell v2 command.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum ShellV2Packet {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+    Exit(u8),
+}
+
+/// Streaming output from an ADB shell v2 command.
+///
+/// The stream keeps stdout and stderr separate and ends after yielding [`ShellV2Packet::Exit`].
+/// Dropping it closes the ADB connection.
+pub struct ShellV2Stream {
+    inner: Pin<Box<dyn Stream<Item = Result<ShellV2Packet>> + Send>>,
+}
+
+impl std::fmt::Debug for ShellV2Stream {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ShellV2Stream")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Stream for ShellV2Stream {
+    type Item = Result<ShellV2Packet>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
+}
+
+impl ShellV2Stream {
+    async fn next_packet(&mut self) -> Option<Result<ShellV2Packet>> {
+        poll_fn(|cx| self.inner.as_mut().poll_next(cx)).await
+    }
+}
+
+async fn read_shell_v2_exact(
+    stream: &mut TcpStream,
+    bytes: &mut [u8],
+    description: &str,
+) -> Result<()> {
+    match stream.read_exact(bytes).await {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Err(
+            DeviceError::ShellProtocol(format!("connection closed while reading {description}")),
+        ),
+        Err(error) => Err(DeviceError::Io(error)),
+    }
+}
+
+fn decode_shell_v2_stream(mut stream: TcpStream) -> ShellV2Stream {
+    let inner = async_stream::try_stream! {
+        loop {
+            let mut header = [0; 5];
+            read_shell_v2_exact(&mut stream, &mut header, "packet header").await?;
+
+            let id = header[0];
+            let payload_length =
+                u32::from_le_bytes(header[1..].try_into().expect("four-byte packet length"))
+                    as usize;
+            if payload_length > ADB_MAX_PAYLOAD {
+                Err(DeviceError::ShellProtocol(format!(
+                    "packet payload is too large: {payload_length} bytes"
+                )))?;
+            }
+
+            if id == 3 {
+                if payload_length != 1 {
+                    Err(DeviceError::ShellProtocol(format!(
+                        "exit packet has {payload_length} bytes instead of 1"
+                    )))?;
+                }
+
+                let mut exit_code = [0];
+                read_shell_v2_exact(&mut stream, &mut exit_code, "exit code").await?;
+                yield ShellV2Packet::Exit(exit_code[0]);
+                break;
+            }
+
+            if id != 1 && id != 2 {
+                Err(DeviceError::ShellProtocol(format!("unknown packet ID {id}")))?;
+            }
+
+            let mut payload = vec![0; payload_length];
+            read_shell_v2_exact(&mut stream, &mut payload, "packet payload").await?;
+            if id == 1 {
+                yield ShellV2Packet::Stdout(payload);
+            } else {
+                yield ShellV2Packet::Stderr(payload);
+            }
+        }
+    };
+
+    ShellV2Stream {
+        inner: Box::pin(inner),
     }
 }
 
@@ -753,9 +870,86 @@ impl Device {
         shell_command: &str,
         enable_run_as: bool,
     ) -> Result<String> {
-        let command = self.shell_service_command(shell_command, enable_run_as)?;
+        let command = self.shell_service_command("shell", shell_command, enable_run_as)?;
         self.execute_host_command_to_string(&command, true, false)
             .await
+    }
+
+    /// Runs a shell v2 command and returns its stdout, stderr, and exit code.
+    ///
+    /// The device must support the `shell_v2` ADB feature. A nonzero exit code is returned in
+    /// [`ShellOutput`] and does not make this method fail.
+    pub async fn execute_host_shell_v2_command(&self, shell_command: &str) -> Result<ShellOutput> {
+        self.execute_host_shell_v2_command_as(shell_command, false)
+            .await
+    }
+
+    /// Runs a shell v2 command with optional `run-as` handling.
+    ///
+    /// If `enable_run_as` is true, [`Device::run_as_package`] must contain the package name.
+    pub async fn execute_host_shell_v2_command_as(
+        &self,
+        shell_command: &str,
+        enable_run_as: bool,
+    ) -> Result<ShellOutput> {
+        let mut stream = self
+            .execute_host_shell_v2_command_stream_as(shell_command, enable_run_as)
+            .await?;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        while let Some(packet) = stream.next_packet().await {
+            match packet? {
+                ShellV2Packet::Stdout(bytes) => stdout.extend(bytes),
+                ShellV2Packet::Stderr(bytes) => stderr.extend(bytes),
+                ShellV2Packet::Exit(exit_code) => {
+                    return Ok(ShellOutput {
+                        stdout,
+                        stderr,
+                        exit_code,
+                    });
+                }
+            }
+        }
+
+        Err(DeviceError::ShellProtocol(
+            "connection ended without an exit packet".to_owned(),
+        ))
+    }
+
+    /// Starts a shell v2 command and returns its output without waiting for it to finish.
+    ///
+    /// The stream yields separate stdout and stderr packets followed by the command's exit code.
+    pub async fn execute_host_shell_v2_command_stream(
+        &self,
+        shell_command: &str,
+    ) -> Result<ShellV2Stream> {
+        self.execute_host_shell_v2_command_stream_as(shell_command, false)
+            .await
+    }
+
+    /// Starts a shell v2 command with optional `run-as` handling.
+    ///
+    /// If `enable_run_as` is true, [`Device::run_as_package`] must contain the package name.
+    pub async fn execute_host_shell_v2_command_stream_as(
+        &self,
+        shell_command: &str,
+        enable_run_as: bool,
+    ) -> Result<ShellV2Stream> {
+        let command = self.shell_service_command("shell,v2,raw", shell_command, enable_run_as)?;
+        self.require_feature("shell_v2").await?;
+        let mut stream = self.open_transport().await?;
+
+        trace!("execute_host_shell_v2_command_stream_as: >> {:?}", command);
+        stream
+            .write_all(encode_message(&command)?.as_bytes())
+            .await?;
+        let response = read_response(&mut stream, false, false).await?;
+        trace!("execute_host_shell_v2_command_stream_as: << {:?}", response);
+        stream.write_all(&[4, 0, 0, 0, 0]).await?;
+        trace!("execute_host_shell_v2_command_stream_as: closed stdin");
+
+        Ok(decode_shell_v2_stream(stream))
     }
 
     /// Starts a shell command with optional `run-as` handling and returns its output immediately.
@@ -766,7 +960,7 @@ impl Device {
         shell_command: &str,
         enable_run_as: bool,
     ) -> Result<ShellStream> {
-        let command = self.shell_service_command(shell_command, enable_run_as)?;
+        let command = self.shell_service_command("shell", shell_command, enable_run_as)?;
         let mut stream = self.open_transport().await?;
 
         trace!("execute_host_shell_command_stream_as: >> {:?}", command);
@@ -779,10 +973,25 @@ impl Device {
         Ok(ShellStream { stream })
     }
 
-    fn shell_service_command(&self, shell_command: &str, enable_run_as: bool) -> Result<String> {
+    async fn require_feature(&self, feature: &str) -> Result<()> {
+        let command = format!("host-serial:{}:features", self.serial);
+        let features = self.host.execute_command(&command, true, true).await?;
+        if features.split(',').any(|known| known == feature) {
+            Ok(())
+        } else {
+            Err(DeviceError::UnsupportedFeature(feature.to_owned()))
+        }
+    }
+
+    fn shell_service_command(
+        &self,
+        service: &str,
+        shell_command: &str,
+        enable_run_as: bool,
+    ) -> Result<String> {
         // We don't want to duplicate su invocations.
         if shell_command.starts_with("su") {
-            return Ok(format!("shell:{shell_command}"));
+            return Ok(format!("{service}:{shell_command}"));
         }
 
         let has_outer_quotes = shell_command.starts_with('"') && shell_command.ends_with('"')
@@ -796,18 +1005,20 @@ impl Device {
                 .ok_or(DeviceError::MissingPackage)?;
 
             if has_outer_quotes {
-                return Ok(format!("shell:run-as {run_as_package} {shell_command}"));
+                return Ok(format!("{service}:run-as {run_as_package} {shell_command}"));
             }
 
             if SYNC_REGEX.is_match(shell_command) {
                 let arg: &str = &shell_command.replace('\'', "'\"'\"'")[..];
-                return Ok(format!("shell:run-as {run_as_package} {arg}"));
+                return Ok(format!("{service}:run-as {run_as_package} {arg}"));
             }
 
-            return Ok(format!("shell:run-as {run_as_package} \"{shell_command}\""));
+            return Ok(format!(
+                "{service}:run-as {run_as_package} \"{shell_command}\""
+            ));
         }
 
-        Ok(format!("shell:{shell_command}"))
+        Ok(format!("{service}:{shell_command}"))
     }
 
     pub async fn is_app_installed(&self, package: &str) -> Result<bool> {
