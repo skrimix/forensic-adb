@@ -12,7 +12,6 @@
 ## Architecture Overview
 - Tokio-based async ADB client with sync protocol coverage: file push/pull, directory ops, package install/uninstall/list, shell (`exec:`/`shell:`), and port forward/reverse.
 - Transfer progress reporting; chunk sizes: pull 64KB, push 32KB; progress updates throttled for large files.
-- Run-as support for app storage paths with safe temp staging and permission handling; paths are validated and sanitized.
 - Errors use `DeviceError`; ADB connect timeout is 5s; responses decoded as UTF‑8 with normalized newlines.
 
 ## Build, Test, and Development Commands
@@ -42,6 +41,5 @@
 ## Security & Configuration Tips
 - ADB must be installed and accessible as `adb`; server defaults to `localhost:5037`.
 - Select a device via `ANDROID_SERIAL` or by passing a serial to `Host::device_or_default`.
-- Library avoids root by default; use `run-as` only when explicitly enabled via `Device.run_as_package`.
 - Avoid adding code that executes privileged commands implicitly; prefer explicit APIs.
-- Dependencies: Tokio, `bstr`, `tempfile`, `walkdir`, `uuid`.
+- `tempfile` and `uuid` are test-only dependencies.

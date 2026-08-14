@@ -88,10 +88,7 @@ async fn mock_shell_v2_stream(response: Vec<u8>) -> (ShellV2Stream, tokio::task:
         stream.shutdown().await.unwrap();
     });
     let device = mock_device(port).await;
-    let stream = device
-        .execute_host_shell_v2_command_stream("test")
-        .await
-        .unwrap();
+    let stream = device.shell_v2_stream("test").await.unwrap();
     (stream, server)
 }
 
@@ -164,10 +161,7 @@ where
         .expect("device_or_default");
 
     let tmp_dir = tempdir().expect("create temp dir");
-    let response = device
-        .execute_host_shell_command("echo $EXTERNAL_STORAGE")
-        .await
-        .unwrap();
+    let response = device.shell("echo $EXTERNAL_STORAGE").await.unwrap();
     let mut test_root = UnixPathBuf::from(response.trim_end_matches('\n'));
 
     test_root.push("mozdevice");
@@ -269,9 +263,7 @@ async fn host_device_or_default() {
         .device_or_default::<String>(Some(&expected_device.serial))
         .await
         .expect("connected device with serial");
-    assert_eq!(device.run_as_package, None);
     assert_eq!(device.serial, expected_device.serial);
-    assert!(device.tempfile.starts_with("/data/local/tmp"));
 }
 
 #[tokio::test]
@@ -310,10 +302,7 @@ async fn device_shell_command() {
         Box::pin(async {
             assert_eq!(
                 "Linux\n",
-                device
-                    .execute_host_shell_command("uname")
-                    .await
-                    .expect("to have shell output")
+                device.shell("uname").await.expect("to have shell output")
             );
         })
     })
@@ -326,7 +315,7 @@ async fn device_shell_v2_command() {
     run_device_test(|device: &Device, _: &TempDir, _: &UnixPath| {
         Box::pin(async {
             let output = device
-                .execute_host_shell_v2_command("cat; printf out; printf err >&2; exit 7")
+                .shell_v2("cat; printf out; printf err >&2; exit 7")
                 .await
                 .expect("to have shell v2 output");
             assert_eq!(output.stdout, b"out");
@@ -355,7 +344,7 @@ async fn device_shell_v2_command_collects_output_and_exit_code() {
     });
     let device = mock_device(port).await;
 
-    let output = device.execute_host_shell_v2_command("test").await.unwrap();
+    let output = device.shell_v2("test").await.unwrap();
     assert_eq!(output.stdout, b"out\0put");
     assert_eq!(output.stderr, b"err\xff");
     assert_eq!(output.exit_code, 7);
@@ -382,10 +371,7 @@ async fn device_shell_v2_command_stream_reads_before_exit() {
         stream.write_all(&shell_v2_frame(3, &[0])).await.unwrap();
     });
     let device = mock_device(port).await;
-    let mut output = device
-        .execute_host_shell_v2_command_stream("logcat")
-        .await
-        .unwrap();
+    let mut output = device.shell_v2_stream("logcat").await.unwrap();
 
     let first = timeout(Duration::from_secs(1), output.next())
         .await
@@ -426,7 +412,7 @@ async fn device_shell_v2_command_requires_feature() {
     });
     let device = mock_device(port).await;
 
-    match device.execute_host_shell_v2_command_stream("test").await {
+    match device.shell_v2_stream("test").await {
         Err(DeviceError::UnsupportedFeature(feature)) => assert_eq!(feature, "shell_v2"),
         result => panic!("expected unsupported feature error, got {result:?}"),
     }
@@ -458,37 +444,11 @@ async fn device_shell_v2_command_reports_handshake_failure() {
     });
     let device = mock_device(port).await;
 
-    match device.execute_host_shell_v2_command_stream("test").await {
+    match device.shell_v2_stream("test").await {
         Err(DeviceError::Adb(message)) => assert_eq!(message, "adb error: failure"),
         result => panic!("expected ADB error, got {result:?}"),
     }
     server.await.unwrap();
-}
-
-#[tokio::test]
-async fn device_shell_v2_command_supports_run_as() {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let server = tokio::spawn(async move {
-        let mut stream =
-            accept_shell_v2_command(&listener, "shell,v2,raw:run-as com.example \"id\"").await;
-        stream.write_all(&shell_v2_frame(3, &[0])).await.unwrap();
-    });
-    let mut device = mock_device(port).await;
-    device.run_as_package = Some("com.example".to_owned());
-
-    let output = device
-        .execute_host_shell_v2_command_as("id", true)
-        .await
-        .unwrap();
-    assert_eq!(output.exit_code, 0);
-    server.await.unwrap();
-
-    device.run_as_package = None;
-    assert!(matches!(
-        device.execute_host_shell_v2_command_as("id", true).await,
-        Err(DeviceError::MissingPackage)
-    ));
 }
 
 #[tokio::test]
@@ -562,13 +522,10 @@ async fn device_shell_command_stream_reads_before_eof() {
     });
     let device = mock_device(port).await;
 
-    let mut output = timeout(
-        Duration::from_secs(1),
-        device.execute_host_shell_command_stream("logcat"),
-    )
-    .await
-    .expect("streaming command to start before EOF")
-    .unwrap();
+    let mut output = timeout(Duration::from_secs(1), device.shell_stream("logcat"))
+        .await
+        .expect("streaming command to start before EOF")
+        .unwrap();
     let mut first = [0; 6];
     timeout(Duration::from_secs(1), output.read_exact(&mut first))
         .await
@@ -600,7 +557,7 @@ async fn device_shell_command_stream_reports_handshake_failure() {
     });
     let device = mock_device(port).await;
 
-    match device.execute_host_shell_command_stream("logcat").await {
+    match device.shell_stream("logcat").await {
         Err(DeviceError::Adb(message)) => assert_eq!(message, "adb error: failure"),
         result => panic!("expected ADB error, got {result:?}"),
     }
@@ -630,50 +587,10 @@ async fn dropping_shell_command_stream_closes_connection() {
     });
     let device = mock_device(port).await;
 
-    let output = device
-        .execute_host_shell_command_stream("logcat")
-        .await
-        .unwrap();
+    let output = device.shell_stream("logcat").await.unwrap();
     drop(output);
 
     assert_eq!(server.await.unwrap(), 0);
-}
-
-#[tokio::test]
-async fn device_shell_command_stream_supports_run_as() {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let server = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.unwrap();
-
-        assert_eq!(
-            read_adb_request(&mut stream).await,
-            "host:transport:test-device"
-        );
-        stream.write_all(b"OKAY").await.unwrap();
-        assert_eq!(
-            read_adb_request(&mut stream).await,
-            "shell:run-as com.example \"id\""
-        );
-        stream.write_all(b"OKAY").await.unwrap();
-    });
-    let mut device = mock_device(port).await;
-    device.run_as_package = Some("com.example".to_owned());
-
-    let output = device
-        .execute_host_shell_command_stream_as("id", true)
-        .await
-        .unwrap();
-    drop(output);
-    server.await.unwrap();
-
-    device.run_as_package = None;
-    assert!(matches!(
-        device
-            .execute_host_shell_command_stream_as("id", true)
-            .await,
-        Err(DeviceError::MissingPackage)
-    ));
 }
 
 #[tokio::test]
@@ -962,7 +879,7 @@ async fn device_push_pull_text_file() {
                     .expect("file has been pushed");
 
                 let file_content = device
-                    .execute_host_shell_command(&format!("cat {}", remote_path.display()))
+                    .shell(&format!("cat {}", remote_path.display()))
                     .await
                     .expect("host shell command for 'cat' to succeed");
 
@@ -1007,7 +924,7 @@ async fn device_push_pull_large_binary_file() {
                     .expect("large file has been pushed");
 
                 let output = device
-                    .execute_host_shell_command(&format!("ls -l {}", remote_path.display()))
+                    .shell(&format!("ls -l {}", remote_path.display()))
                     .await
                     .expect("host shell command for 'ls' to succeed");
 
@@ -1078,7 +995,7 @@ async fn device_push_pull_large_binary_file() {
 //                         .expect("file has been pushed");
 
 //                     let output = device
-//                         .execute_host_shell_command(&format!("ls -l {}", remote_path.display()))
+//                         .shell(&format!("ls -l {}", remote_path.display()))
 //                         .await
 //                         .expect("host shell command for 'ls' to succeed");
 
@@ -1087,7 +1004,7 @@ async fn device_push_pull_large_binary_file() {
 //                 }
 
 //                 let output = device
-//                     .execute_host_shell_command(&format!("ls -ld {}", remote_root_path.display()))
+//                     .shell(&format!("ls -ld {}", remote_root_path.display()))
 //                     .await
 //                     .expect("host shell command for 'ls parent' to succeed");
 
@@ -1145,7 +1062,7 @@ async fn device_push_and_list_dir() {
                 for file in files.iter() {
                     let path = append_components(remote_root_path, Path::new(file)).unwrap();
                     let output = device
-                        .execute_host_shell_command(&format!("ls {}", path.display()))
+                        .shell(&format!("ls {}", path.display()))
                         .await
                         .expect("host shell command for 'ls' to succeed");
 
@@ -1332,7 +1249,7 @@ async fn device_push_and_list_dir_flat() {
                 for file in files.iter() {
                     let path = append_components(remote_root_path, file).unwrap();
                     let output = device
-                        .execute_host_shell_command(&format!("ls {}", path.display()))
+                        .shell(&format!("ls {}", path.display()))
                         .await
                         .expect("host shell command for 'ls' to succeed");
 
@@ -1500,14 +1417,6 @@ async fn device_stat_nonexistent() {
 
 #[test]
 fn format_own_device_error_types() {
-    assert_eq!(
-        format!("{}", DeviceError::InvalidStorage),
-        "Invalid storage".to_string()
-    );
-    assert_eq!(
-        format!("{}", DeviceError::MissingPackage),
-        "Missing package".to_string()
-    );
     assert_eq!(
         format!("{}", DeviceError::MultipleDevices),
         "Multiple Android devices online".to_string()

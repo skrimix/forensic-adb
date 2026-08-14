@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-pub mod adb;
+mod adb;
 pub mod shell;
 
 #[cfg(test)]
@@ -31,15 +31,16 @@ use tokio::process::Command;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::{timeout, Duration};
 pub use unix_path::{Path as UnixPath, PathBuf as UnixPathBuf};
-use uuid::Uuid;
 use walkdir::WalkDir;
 
-use crate::adb::{DeviceSerial, SyncCommand};
+use crate::adb::SyncCommand;
 
 const ADB_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const ADB_MAX_PAYLOAD: usize = 1024 * 1024;
 
 pub type Result<T> = std::result::Result<T, DeviceError>;
+/// Serial number used to identify an ADB device.
+pub type DeviceSerial = String;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum UnixFileStatus {
@@ -68,12 +69,8 @@ pub enum DeviceError {
     Adb(String),
     #[error(transparent)]
     FromInt(#[from] TryFromIntError),
-    #[error("Invalid storage")]
-    InvalidStorage,
     #[error(transparent)]
     Io(#[from] io::Error),
-    #[error("Missing package")]
-    MissingPackage,
     #[error("Multiple Android devices online")]
     MultipleDevices,
     #[error(transparent)]
@@ -562,7 +559,7 @@ impl Host {
         }
     }
 
-    pub async fn connect(&self) -> Result<TcpStream> {
+    async fn connect(&self) -> Result<TcpStream> {
         let addr = format!(
             "{}:{}",
             self.host.clone().unwrap_or_else(|| "localhost".to_owned()),
@@ -578,7 +575,7 @@ impl Host {
         Ok(stream)
     }
 
-    pub async fn execute_command(
+    async fn execute_command(
         &self,
         command: &str,
         has_output: bool,
@@ -597,7 +594,7 @@ impl Host {
         Ok(response.to_owned())
     }
 
-    pub async fn execute_host_command(
+    async fn execute_host_command(
         &self,
         host_command: &str,
         has_length: bool,
@@ -642,7 +639,7 @@ impl Host {
     ///
     /// Issues the host service `host:connect:<addr>` equivalent to
     /// `adb connect <addr>` (e.g., "192.168.1.171:5555").
-    /// Returns the server's message (e.g., "connected to <addr>").
+    /// Returns the server's message (for example, `connected to <addr>`).
     pub async fn connect_device<T: AsRef<str>>(&self, addr: T) -> Result<String> {
         self.execute_host_command(&format!("connect:{}", addr.as_ref()), true, true)
             .await
@@ -651,7 +648,7 @@ impl Host {
     /// Disconnects the ADB server from a specific remote device over TCP/IP.
     ///
     /// Issues `host:disconnect:<addr>` equivalent to `adb disconnect <addr>`.
-    /// Returns the server's message (e.g., "disconnected <addr>").
+    /// Returns the server's message (for example, `disconnected <addr>`).
     pub async fn disconnect_device<T: AsRef<str>>(&self, addr: T) -> Result<String> {
         self.execute_host_command(&format!("disconnect:{}", addr.as_ref()), true, true)
             .await
@@ -714,11 +711,6 @@ pub struct Device {
 
     /// Information about the device.
     pub info: BTreeMap<String, String>,
-
-    pub run_as_package: Option<String>,
-
-    /// Cache intermediate tempfile name used in pushing via run_as.
-    pub tempfile: UnixPathBuf,
 }
 
 impl Device {
@@ -727,22 +719,11 @@ impl Device {
         serial: DeviceSerial,
         info: BTreeMap<String, String>,
     ) -> Result<Device> {
-        let mut device = Device {
-            host,
-            serial,
-            info,
-            run_as_package: None,
-            tempfile: UnixPathBuf::from("/data/local/tmp"),
-        };
-        device
-            .tempfile
-            .push(Uuid::new_v4().as_hyphenated().to_string());
-
-        Ok(device)
+        Ok(Device { host, serial, info })
     }
 
     pub async fn clear_app_data(&self, package: &str) -> Result<bool> {
-        self.execute_host_shell_command(&format!("pm clear {package}"))
+        self.shell(&format!("pm clear {package}"))
             .await
             .map(|v| v.contains("Success"))
     }
@@ -750,9 +731,7 @@ impl Device {
     pub async fn create_dir(&self, path: &UnixPath) -> Result<()> {
         debug!("Creating {}", path.display());
 
-        let enable_run_as = self.enable_run_as_for_path(path);
-        self.execute_host_shell_command_as(&format!("mkdir -p {}", path.display()), enable_run_as)
-            .await?;
+        self.shell(&format!("mkdir -p {}", path.display())).await?;
 
         Ok(())
     }
@@ -760,31 +739,24 @@ impl Device {
     pub async fn get_android_version(&self) -> Result<u32> {
         // Query the major Android version (e.g. 9, 10, 11, 14)
         // ro.build.version.release may be "14" or "14.0.0"; parse the leading component.
-        let version_str = self
-            .execute_host_shell_command("getprop ro.build.version.release")
-            .await?;
+        let version_str = self.shell("getprop ro.build.version.release").await?;
         let major = version_str.trim().split('.').next().unwrap_or("");
         Ok(major.parse::<u32>()?)
     }
 
     pub async fn chmod(&self, path: &UnixPath, mask: &str, recursive: bool) -> Result<()> {
-        let enable_run_as = self.enable_run_as_for_path(path);
-
         let recursive = match recursive {
             true => " -R",
             false => "",
         };
 
-        self.execute_host_shell_command_as(
-            &format!("chmod {} {} {}", recursive, mask, path.display()),
-            enable_run_as,
-        )
-        .await?;
+        self.shell(&format!("chmod {} {} {}", recursive, mask, path.display()))
+            .await?;
 
         Ok(())
     }
 
-    pub async fn execute_host_command(
+    async fn execute_host_command(
         &self,
         command: &str,
         has_output: bool,
@@ -816,7 +788,7 @@ impl Device {
         Ok(stream)
     }
 
-    pub async fn execute_host_command_to_string(
+    async fn execute_host_command_to_string(
         &self,
         command: &str,
         has_output: bool,
@@ -832,19 +804,11 @@ impl Device {
         Ok(response.replace("\r\n", "\n"))
     }
 
-    pub fn enable_run_as_for_path(&self, path: &UnixPath) -> bool {
-        match &self.run_as_package {
-            Some(package) => {
-                let mut p = UnixPathBuf::from("/data/data/");
-                p.push(package);
-                path.starts_with(p)
-            }
-            None => false,
-        }
-    }
-
-    pub async fn execute_host_shell_command(&self, shell_command: &str) -> Result<String> {
-        self.execute_host_shell_command_as(shell_command, false)
+    /// Runs a shell command and returns its merged output as UTF-8 text.
+    ///
+    /// Use [`Device::shell_v2()`] when stdout, stderr, and the exit code are needed separately.
+    pub async fn shell(&self, shell_command: &str) -> Result<String> {
+        self.execute_host_command_to_string(&format!("shell:{shell_command}"), true, false)
             .await
     }
 
@@ -852,26 +816,23 @@ impl Device {
     ///
     /// Use this for long-running commands such as `logcat`. The stream contains merged stdout and
     /// stderr and does not report the command's exit status.
-    pub async fn execute_host_shell_command_stream(
-        &self,
-        shell_command: &str,
-    ) -> Result<ShellStream> {
-        self.execute_host_shell_command_stream_as(shell_command, false)
-            .await
+    pub async fn shell_stream(&self, shell_command: &str) -> Result<ShellStream> {
+        let command = format!("shell:{shell_command}");
+        let mut stream = self.open_transport().await?;
+
+        trace!("shell_stream: >> {:?}", command);
+        stream
+            .write_all(encode_message(&command)?.as_bytes())
+            .await?;
+        let response = read_response(&mut stream, false, false).await?;
+        trace!("shell_stream: << {:?}", response);
+
+        Ok(ShellStream { stream })
     }
 
-    pub async fn execute_host_exec_out_command(&self, shell_command: &str) -> Result<Vec<u8>> {
+    /// Runs a command through the ADB `exec` service and returns its raw output.
+    pub async fn exec_out(&self, shell_command: &str) -> Result<Vec<u8>> {
         self.execute_host_command(&format!("exec:{shell_command}"), true, false)
-            .await
-    }
-
-    pub async fn execute_host_shell_command_as(
-        &self,
-        shell_command: &str,
-        enable_run_as: bool,
-    ) -> Result<String> {
-        let command = self.shell_service_command("shell", shell_command, enable_run_as)?;
-        self.execute_host_command_to_string(&command, true, false)
             .await
     }
 
@@ -879,22 +840,8 @@ impl Device {
     ///
     /// The device must support the `shell_v2` ADB feature. A nonzero exit code is returned in
     /// [`ShellOutput`] and does not make this method fail.
-    pub async fn execute_host_shell_v2_command(&self, shell_command: &str) -> Result<ShellOutput> {
-        self.execute_host_shell_v2_command_as(shell_command, false)
-            .await
-    }
-
-    /// Runs a shell v2 command with optional `run-as` handling.
-    ///
-    /// If `enable_run_as` is true, [`Device::run_as_package`] must contain the package name.
-    pub async fn execute_host_shell_v2_command_as(
-        &self,
-        shell_command: &str,
-        enable_run_as: bool,
-    ) -> Result<ShellOutput> {
-        let mut stream = self
-            .execute_host_shell_v2_command_stream_as(shell_command, enable_run_as)
-            .await?;
+    pub async fn shell_v2(&self, shell_command: &str) -> Result<ShellOutput> {
+        let mut stream = self.shell_v2_stream(shell_command).await?;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
 
@@ -920,57 +867,21 @@ impl Device {
     /// Starts a shell v2 command and returns its output without waiting for it to finish.
     ///
     /// The stream yields separate stdout and stderr packets followed by the command's exit code.
-    pub async fn execute_host_shell_v2_command_stream(
-        &self,
-        shell_command: &str,
-    ) -> Result<ShellV2Stream> {
-        self.execute_host_shell_v2_command_stream_as(shell_command, false)
-            .await
-    }
-
-    /// Starts a shell v2 command with optional `run-as` handling.
-    ///
-    /// If `enable_run_as` is true, [`Device::run_as_package`] must contain the package name.
-    pub async fn execute_host_shell_v2_command_stream_as(
-        &self,
-        shell_command: &str,
-        enable_run_as: bool,
-    ) -> Result<ShellV2Stream> {
-        let command = self.shell_service_command("shell,v2,raw", shell_command, enable_run_as)?;
+    pub async fn shell_v2_stream(&self, shell_command: &str) -> Result<ShellV2Stream> {
+        let command = format!("shell,v2,raw:{shell_command}");
         self.require_feature("shell_v2").await?;
         let mut stream = self.open_transport().await?;
 
-        trace!("execute_host_shell_v2_command_stream_as: >> {:?}", command);
+        trace!("shell_v2_stream: >> {:?}", command);
         stream
             .write_all(encode_message(&command)?.as_bytes())
             .await?;
         let response = read_response(&mut stream, false, false).await?;
-        trace!("execute_host_shell_v2_command_stream_as: << {:?}", response);
+        trace!("shell_v2_stream: << {:?}", response);
         stream.write_all(&[4, 0, 0, 0, 0]).await?;
-        trace!("execute_host_shell_v2_command_stream_as: closed stdin");
+        trace!("shell_v2_stream: closed stdin");
 
         Ok(decode_shell_v2_stream(stream))
-    }
-
-    /// Starts a shell command with optional `run-as` handling and returns its output immediately.
-    ///
-    /// If `enable_run_as` is true, [`Device::run_as_package`] must contain the package name.
-    pub async fn execute_host_shell_command_stream_as(
-        &self,
-        shell_command: &str,
-        enable_run_as: bool,
-    ) -> Result<ShellStream> {
-        let command = self.shell_service_command("shell", shell_command, enable_run_as)?;
-        let mut stream = self.open_transport().await?;
-
-        trace!("execute_host_shell_command_stream_as: >> {:?}", command);
-        stream
-            .write_all(encode_message(&command)?.as_bytes())
-            .await?;
-        let response = read_response(&mut stream, false, false).await?;
-        trace!("execute_host_shell_command_stream_as: << {:?}", response);
-
-        Ok(ShellStream { stream })
     }
 
     async fn require_feature(&self, feature: &str) -> Result<()> {
@@ -983,46 +894,8 @@ impl Device {
         }
     }
 
-    fn shell_service_command(
-        &self,
-        service: &str,
-        shell_command: &str,
-        enable_run_as: bool,
-    ) -> Result<String> {
-        // We don't want to duplicate su invocations.
-        if shell_command.starts_with("su") {
-            return Ok(format!("{service}:{shell_command}"));
-        }
-
-        let has_outer_quotes = shell_command.starts_with('"') && shell_command.ends_with('"')
-            || shell_command.starts_with('\'') && shell_command.ends_with('\'');
-
-        // Execute command as package
-        if enable_run_as {
-            let run_as_package = self
-                .run_as_package
-                .as_ref()
-                .ok_or(DeviceError::MissingPackage)?;
-
-            if has_outer_quotes {
-                return Ok(format!("{service}:run-as {run_as_package} {shell_command}"));
-            }
-
-            if SYNC_REGEX.is_match(shell_command) {
-                let arg: &str = &shell_command.replace('\'', "'\"'\"'")[..];
-                return Ok(format!("{service}:run-as {run_as_package} {arg}"));
-            }
-
-            return Ok(format!(
-                "{service}:run-as {run_as_package} \"{shell_command}\""
-            ));
-        }
-
-        Ok(format!("{service}:{shell_command}"))
-    }
-
     pub async fn is_app_installed(&self, package: &str) -> Result<bool> {
-        self.execute_host_shell_command(&format!("pm path {package}"))
+        self.shell(&format!("pm path {package}"))
             .await
             .map(|v| v.contains("package:"))
     }
@@ -1044,14 +917,12 @@ impl Device {
             };
         }
 
-        self.execute_host_shell_command(&am_start)
-            .await
-            .map(|v| v.contains("Complete"))
+        self.shell(&am_start).await.map(|v| v.contains("Complete"))
     }
 
     pub async fn force_stop(&self, package: &str) -> Result<()> {
         debug!("Force stopping Android package: {}", package);
-        self.execute_host_shell_command(&format!("am force-stop {package}"))
+        self.shell(&format!("am force-stop {package}"))
             .await
             .and(Ok(()))
     }
@@ -1260,8 +1131,8 @@ impl Device {
         Ok(listings)
     }
 
-    pub async fn path_exists(&self, path: &UnixPath, enable_run_as: bool) -> Result<bool> {
-        self.execute_host_shell_command_as(format!("ls {}", path.display()).as_str(), enable_run_as)
+    pub async fn path_exists(&self, path: &UnixPath) -> Result<bool> {
+        self.shell(format!("ls {}", path.display()).as_str())
             .await
             .map(|path| !path.contains("No such file or directory"))
     }
@@ -1581,12 +1452,6 @@ impl Device {
             });
         }
 
-        let enable_run_as = self.enable_run_as_for_path(&dest.to_path_buf());
-        let dest1 = match enable_run_as {
-            true => self.tempfile.as_path(),
-            false => UnixPath::new(dest),
-        };
-
         // If the destination directory does not exist, adb will
         // create it and any necessary ancestors however it will not
         // set the directory permissions to 0o777.  In addition,
@@ -1603,7 +1468,7 @@ impl Device {
         let mut root: Option<&UnixPath> = None;
 
         while let Some(path) = current {
-            if self.path_exists(path, enable_run_as).await? {
+            if self.path_exists(path).await? {
                 break;
             }
             if leaf.is_none() {
@@ -1638,7 +1503,7 @@ impl Device {
         let _bytes = read_response(&mut stream, false, true).await?;
 
         stream.write_all(SyncCommand::Send.code()).await?;
-        let args_ = format!("{},{}", dest1.display(), mode);
+        let args_ = format!("{},{}", dest.display(), mode);
         let args = args_.as_bytes();
         write_length_little_endian(&mut stream, args.len()).await?;
         stream.write_all(args).await?;
@@ -1705,24 +1570,8 @@ impl Device {
         stream.read_exact(&mut buf[0..4]).await?;
 
         if buf.starts_with(SyncCommand::Okay.code()) {
-            if enable_run_as {
-                // Use cp -a to preserve the permissions set by push.
-                let result = self
-                    .execute_host_shell_command_as(
-                        format!("cp -aR {} {}", dest1.display(), dest.display()).as_str(),
-                        enable_run_as,
-                    )
-                    .await;
-                if self.remove(dest1).await.is_err() {
-                    warn!("Failed to remove {}", dest1.display());
-                }
-                result?;
-            }
             Ok(())
         } else if buf.starts_with(SyncCommand::Fail.code()) {
-            if enable_run_as && self.remove(dest1).await.is_err() {
-                warn!("Failed to remove {}", dest1.display());
-            }
             let n = buf.len().min(read_length_little_endian(&mut stream).await?);
 
             stream.read_exact(&mut buf[0..n]).await?;
@@ -1733,9 +1582,6 @@ impl Device {
 
             Err(DeviceError::Adb(message))
         } else {
-            if self.remove(dest1).await.is_err() {
-                warn!("Failed to remove {}", dest1.display());
-            }
             Err(DeviceError::Adb("FAIL (unknown)".to_owned()))
         }
     }
@@ -1907,11 +1753,7 @@ impl Device {
     pub async fn remove(&self, path: &UnixPath) -> Result<()> {
         debug!("Deleting {}", path.display());
 
-        self.execute_host_shell_command_as(
-            &format!("rm -rf {}", path.display()),
-            self.enable_run_as_for_path(path),
-        )
-        .await?;
+        self.shell(&format!("rm -rf {}", path.display())).await?;
 
         Ok(())
     }
@@ -2034,9 +1876,9 @@ impl Device {
             command.push_str(" --bypass-low-target-sdk-block");
         }
         command.push_str(&format!(" \"{}\"", tmp_apk_path.display()));
-        let output = self.execute_host_shell_command(&command).await?;
+        let output = self.shell(&command).await?;
 
-        self.execute_host_shell_command(format!("rm \"{}\"", tmp_apk_path.display()).as_str())
+        self.shell(format!("rm \"{}\"", tmp_apk_path.display()).as_str())
             .await?;
 
         if !output.starts_with("Success") {
@@ -2106,9 +1948,9 @@ impl Device {
             command.push_str(" --bypass-low-target-sdk-block");
         }
         command.push_str(&format!(" \"{}\"", tmp_apk_path.display()));
-        let output = self.execute_host_shell_command(&command).await?;
+        let output = self.shell(&command).await?;
 
-        self.execute_host_shell_command(format!("rm \"{}\"", tmp_apk_path.display()).as_str())
+        self.shell(format!("rm \"{}\"", tmp_apk_path.display()).as_str())
             .await?;
 
         if !output.starts_with("Success") {
@@ -2122,7 +1964,7 @@ impl Device {
 
     pub async fn uninstall_package(&self, package: &str) -> Result<()> {
         let command = format!("pm uninstall {package}");
-        let output = self.execute_host_shell_command(&command).await?;
+        let output = self.shell(&command).await?;
         if !output.starts_with("Success") {
             return Err(DeviceError::PackageManagerError(output));
         }
@@ -2136,7 +1978,7 @@ impl Device {
         } else {
             "pm list packages"
         };
-        let output = self.execute_host_shell_command(command).await?;
+        let output = self.shell(command).await?;
         let mut packages = output
             .lines()
             .filter(|line| line.starts_with("package:"))

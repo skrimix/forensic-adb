@@ -23,7 +23,7 @@ async fn main() -> Result<(), DeviceError> {
         .await?;
     println!("Selected device: {:?}", device);
 
-    let output = device.execute_host_shell_command("id").await?;
+    let output = device.shell("id").await?;
     println!("Received response: {:?}", output);
 
     Ok(())
@@ -39,7 +39,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 #[tokio::main]
 async fn main() -> Result<(), DeviceError> {
     let device = Host::default().device_or_default::<String>(None).await?;
-    let output = device.execute_host_shell_command_stream("logcat").await?;
+    let output = device.shell_stream("logcat").await?;
     let mut lines = BufReader::new(output).lines();
 
     while let Some(line) = lines.next_line().await? {
@@ -59,7 +59,7 @@ use forensic_adb::{DeviceError, Host};
 async fn main() -> Result<(), DeviceError> {
     let device = Host::default().device_or_default::<String>(None).await?;
     let output = device
-        .execute_host_shell_v2_command("printf output; printf error >&2; exit 7")
+        .shell_v2("printf output; printf error >&2; exit 7")
         .await?;
 
     println!("stdout: {}", String::from_utf8_lossy(&output.stdout));
@@ -78,7 +78,7 @@ use futures::StreamExt;
 #[tokio::main]
 async fn main() -> Result<(), DeviceError> {
     let device = Host::default().device_or_default::<String>(None).await?;
-    let mut output = device.execute_host_shell_v2_command_stream("logcat").await?;
+    let mut output = device.shell_v2_stream("logcat").await?;
 
     while let Some(packet) = output.next().await {
         match packet? {

@@ -11,12 +11,10 @@ async fn main() -> Result<(), DeviceError> {
     let device = host.device_or_default(Option::<&String>::None).await?;
     println!("Selected device: {device:?}");
 
-    let output = device.execute_host_exec_out_command("id").await?;
+    let output = device.exec_out("id").await?;
     println!("Received response: {:?}", bstr::BStr::new(&output));
 
-    let output = device
-        .execute_host_exec_out_command("pm list packages -f")
-        .await?;
+    let output = device.exec_out("pm list packages -f").await?;
     for line in output.lines() {
         println!("Received line: {:?}", bstr::BStr::new(line));
     }

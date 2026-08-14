@@ -26,7 +26,7 @@ The library implements the full ADB sync protocol for file operations:
 - File transfer (push/pull) with progress reporting
 - Directory operations with recursive support
 - Package management (install/uninstall/list)
-- Shell command execution with run-as support
+- Shell command execution with legacy and shell-v2 output
 - Port forwarding and reverse port forwarding
 
 ## Development Commands
@@ -77,14 +77,14 @@ Key test requirements:
 
 ### Security Considerations
 - No root commands are executed by default (forensic safety)
-- Run-as functionality available for app-specific operations  
+- Commands run with the device shell user by default
 - Proper path sanitization and validation
 
 ### File Operations
 - Uses 32KB buffer for push operations, 64KB for pull operations
 - Progress reporting available for large file transfers
 - Automatic directory creation with permission handling
-- Temporary file staging for run-as operations
+- Direct ADB sync transfers to remote paths
 
 ### Error Handling
 - Comprehensive `DeviceError` enum covering all failure modes
@@ -95,6 +95,6 @@ Key test requirements:
 
 - Built on Tokio for async operations
 - Uses `bstr` for byte string handling in shell operations
-- `tempfile` for secure temporary file creation
+- `tempfile` for test directories
 - `walkdir` for recursive directory traversal
-- `uuid` for generating unique temporary file names
+- `uuid` for unique test paths

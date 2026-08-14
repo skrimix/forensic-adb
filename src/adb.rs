@@ -3,14 +3,13 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 #[derive(Debug, PartialEq)]
-pub enum SyncCommand {
+pub(crate) enum SyncCommand {
     Data,
     Dent,
     Done,
     Fail,
     List,
     Okay,
-    Quit,
     Recv,
     Send,
     Stat,
@@ -18,7 +17,7 @@ pub enum SyncCommand {
 
 impl SyncCommand {
     // Returns the byte serialisation of the protocol status.
-    pub fn code(&self) -> &'static [u8; 4] {
+    pub(crate) fn code(&self) -> &'static [u8; 4] {
         use self::SyncCommand::*;
         match *self {
             Data => b"DATA",
@@ -27,12 +26,9 @@ impl SyncCommand {
             Fail => b"FAIL",
             List => b"LIST",
             Okay => b"OKAY",
-            Quit => b"QUIT",
             Recv => b"RECV",
             Send => b"SEND",
             Stat => b"STAT",
         }
     }
 }
-
-pub type DeviceSerial = String;
